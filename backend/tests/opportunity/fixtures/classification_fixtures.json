@@ -1,0 +1,352 @@
+[
+  {
+    "id": "fix_1",
+    "description": "Clear SUPPORTS: paper provides confirming evidence",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Lack of longitudinal studies on intermittent fasting in older adults",
+      "opportunity_problem_statement": "Most studies on intermittent fasting focus on short-term outcomes in young populations.",
+      "opportunity_description": "We need 5+ year studies assessing bone density and muscle mass in patients over 65.",
+      "paper_title": "A 12-month observational study of time-restricted eating in seniors",
+      "paper_abstract": "We observed 50 individuals over age 65 adhering to a 16:8 fasting schedule. Results showed minor bone density loss over 12 months, highlighting the need for longer-term multi-year follow-ups.",
+      "paper_excerpt": "highlighting the need for longer-term multi-year follow-ups."
+    },
+    "expected_relationship": "SUPPORTS"
+  },
+  {
+    "id": "fix_2",
+    "description": "Clear ADDRESSES: paper directly solves part of the problem",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Lack of longitudinal studies on intermittent fasting in older adults",
+      "opportunity_problem_statement": "Most studies on intermittent fasting focus on short-term outcomes in young populations.",
+      "opportunity_description": "We need 5+ year studies assessing bone density and muscle mass in patients over 65.",
+      "paper_title": "A 5-year randomized controlled trial of intermittent fasting in adults over 65",
+      "paper_abstract": "This study presents the results of a 5-year trial assessing bone mineral density and sarcopenia in older adults undergoing 5:2 fasting. Bone density decreased slightly but muscle mass was preserved.",
+      "paper_excerpt": "results of a 5-year trial assessing bone mineral density and sarcopenia in older adults"
+    },
+    "expected_relationship": "ADDRESSES"
+  },
+  {
+    "id": "fix_3",
+    "description": "Clear CONTRADICTS: paper shows the problem is based on false premises",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Lack of longitudinal studies on intermittent fasting in older adults",
+      "opportunity_problem_statement": "Most studies on intermittent fasting focus on short-term outcomes in young populations.",
+      "opportunity_description": "We need 5+ year studies assessing bone density and muscle mass in patients over 65.",
+      "paper_title": "A meta-analysis of decades of intermittent fasting research in geriatric populations",
+      "paper_abstract": "Contrary to popular belief, our comprehensive review found 42 distinct longitudinal trials lasting 5-10 years focusing entirely on bone and muscle health in seniors undergoing intermittent fasting.",
+      "paper_excerpt": "found 42 distinct longitudinal trials lasting 5-10 years focusing entirely on bone and muscle health in seniors"
+    },
+    "expected_relationship": "CONTRADICTS"
+  },
+  {
+    "id": "fix_4",
+    "description": "Clear EXTENDS: paper applies the concept to a new related area",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Lack of longitudinal studies on intermittent fasting in older adults",
+      "opportunity_problem_statement": "Most studies on intermittent fasting focus on short-term outcomes in young populations.",
+      "opportunity_description": "We need 5+ year studies assessing bone density and muscle mass in patients over 65.",
+      "paper_title": "Long-term effects of intermittent fasting on cognitive decline in Alzheimer's models",
+      "paper_abstract": "We explore a new dimension of long-term fasting by focusing entirely on cognitive health, conducting a 4-year study on intermittent fasting's effect on dementia progression in older adults.",
+      "paper_excerpt": "focusing entirely on cognitive health, conducting a 4-year study on intermittent fasting's effect on dementia progression"
+    },
+    "expected_relationship": "EXTENDS"
+  },
+  {
+    "id": "fix_5",
+    "description": "Clear UNRELATED: paper is completely off-topic",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Lack of longitudinal studies on intermittent fasting in older adults",
+      "opportunity_problem_statement": "Most studies on intermittent fasting focus on short-term outcomes in young populations.",
+      "opportunity_description": "We need 5+ year studies assessing bone density and muscle mass in patients over 65.",
+      "paper_title": "Novel architectures for transformer-based large language models",
+      "paper_abstract": "We present a new attention mechanism that reduces quadratic complexity to linear time.",
+      "paper_excerpt": "new attention mechanism"
+    },
+    "expected_relationship": "UNRELATED"
+  },
+  {
+    "id": "fix_6",
+    "description": "Borderline SUPPORTS: paper mentions the gap briefly",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Scalability bottlenecks in federated learning over unreliable networks",
+      "opportunity_problem_statement": "Current FL protocols fail when client dropout exceeds 40%.",
+      "opportunity_description": "Need robust aggregation protocols for high-dropout mobile environments.",
+      "paper_title": "A survey of federated learning applications in healthcare",
+      "paper_abstract": "FL is highly promising for hospitals. However, as noted in recent literature, high dropout rates in mobile health applications remain a severe limitation that future work must address before widespread adoption.",
+      "paper_excerpt": "high dropout rates in mobile health applications remain a severe limitation that future work must address"
+    },
+    "expected_relationship": "SUPPORTS"
+  },
+  {
+    "id": "fix_7",
+    "description": "Clear ADDRESSES: paper proposes a solution to the bottleneck",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Scalability bottlenecks in federated learning over unreliable networks",
+      "opportunity_problem_statement": "Current FL protocols fail when client dropout exceeds 40%.",
+      "opportunity_description": "Need robust aggregation protocols for high-dropout mobile environments.",
+      "paper_title": "RobustAgg: A novel aggregation scheme for federated learning",
+      "paper_abstract": "We introduce RobustAgg, an algorithm specifically designed for environments with unreliable clients. Our protocol maintains convergence even when client dropout reaches up to 75%.",
+      "paper_excerpt": "maintains convergence even when client dropout reaches up to 75%."
+    },
+    "expected_relationship": "ADDRESSES"
+  },
+  {
+    "id": "fix_8",
+    "description": "Clear CONTRADICTS: paper shows the bottleneck is a myth under modern networks",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Scalability bottlenecks in federated learning over unreliable networks",
+      "opportunity_problem_statement": "Current FL protocols fail when client dropout exceeds 40%.",
+      "opportunity_description": "Need robust aggregation protocols for high-dropout mobile environments.",
+      "paper_title": "5G networks eliminate the client dropout problem in mobile FL",
+      "paper_abstract": "Previous concerns regarding client dropout in mobile federated learning were based on 4G LTE assumptions. Our empirical study of 100,000 nodes on 5G shows dropout rates never exceed 5%, rendering specific high-dropout aggregation algorithms unnecessary.",
+      "paper_excerpt": "dropout rates never exceed 5%, rendering specific high-dropout aggregation algorithms unnecessary."
+    },
+    "expected_relationship": "CONTRADICTS"
+  },
+  {
+    "id": "fix_9",
+    "description": "Clear EXTENDS: applies to cross-silo instead of mobile",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Scalability bottlenecks in federated learning over unreliable networks",
+      "opportunity_problem_statement": "Current FL protocols fail when client dropout exceeds 40%.",
+      "opportunity_description": "Need robust aggregation protocols for high-dropout mobile environments.",
+      "paper_title": "Handling node failure in cross-silo institutional federated learning",
+      "paper_abstract": "While much focus has been on mobile client dropout, institutional cross-silo FL faces different challenges, such as permanent node failure due to regulatory bans. We extend robust aggregation principles to handle permanent institutional exclusion.",
+      "paper_excerpt": "We extend robust aggregation principles to handle permanent institutional exclusion."
+    },
+    "expected_relationship": "EXTENDS"
+  },
+  {
+    "id": "fix_10",
+    "description": "Borderline UNRELATED: paper is about FL but completely ignores dropout",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Scalability bottlenecks in federated learning over unreliable networks",
+      "opportunity_problem_statement": "Current FL protocols fail when client dropout exceeds 40%.",
+      "opportunity_description": "Need robust aggregation protocols for high-dropout mobile environments.",
+      "paper_title": "Differential privacy guarantees in federated learning",
+      "paper_abstract": "We propose a new mechanism for adding noise to gradients before aggregation in FL, ensuring strict epsilon-delta privacy.",
+      "paper_excerpt": "ensuring strict epsilon-delta privacy"
+    },
+    "expected_relationship": "UNRELATED"
+  },
+  {
+    "id": "fix_11",
+    "description": "Clear SUPPORTS: paper demonstrates failure of existing protocols in edge cases",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Scalability bottlenecks in federated learning over unreliable networks",
+      "opportunity_problem_statement": "Current FL protocols fail when client dropout exceeds 40%.",
+      "opportunity_description": "Need robust aggregation protocols for high-dropout mobile environments.",
+      "paper_title": "Empirical analysis of FedAvg on intermittent networks",
+      "paper_abstract": "In our tests, standard FedAvg stopped converging entirely once network instability caused 45% of nodes to drop out mid-round. This empirically validates the urgent need for new fault-tolerant approaches.",
+      "paper_excerpt": "empirically validates the urgent need for new fault-tolerant approaches."
+    },
+    "expected_relationship": "SUPPORTS"
+  },
+  {
+    "id": "fix_12",
+    "description": "Borderline ADDRESSES: tackles a small subset of the problem",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Scalability bottlenecks in federated learning over unreliable networks",
+      "opportunity_problem_statement": "Current FL protocols fail when client dropout exceeds 40%.",
+      "opportunity_description": "Need robust aggregation protocols for high-dropout mobile environments.",
+      "paper_title": "Asynchronous aggregation for low-latency nodes in FL",
+      "paper_abstract": "We designed an asynchronous update method that allows late nodes to submit gradients in subsequent rounds. This helps mitigate the impact of temporary disconnects in small-scale mobile setups, though it struggles with permanent dropouts.",
+      "paper_excerpt": "helps mitigate the impact of temporary disconnects in small-scale mobile setups"
+    },
+    "expected_relationship": "ADDRESSES"
+  },
+  {
+    "id": "fix_13",
+    "description": "Clear CONTRADICTS: asserts no new algorithms are needed",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Scalability bottlenecks in federated learning over unreliable networks",
+      "opportunity_problem_statement": "Current FL protocols fail when client dropout exceeds 40%.",
+      "opportunity_description": "Need robust aggregation protocols for high-dropout mobile environments.",
+      "paper_title": "FedAvg is inherently robust to high dropout",
+      "paper_abstract": "Contrary to recent claims, our mathematical proof demonstrates that vanilla FedAvg maintains identical convergence bounds even with 99% client dropout, provided the learning rate is scaled correctly.",
+      "paper_excerpt": "demonstrates that vanilla FedAvg maintains identical convergence bounds even with 99% client dropout"
+    },
+    "expected_relationship": "CONTRADICTS"
+  },
+  {
+    "id": "fix_14",
+    "description": "Clear EXTENDS: moves focus from aggregation to client selection",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Scalability bottlenecks in federated learning over unreliable networks",
+      "opportunity_problem_statement": "Current FL protocols fail when client dropout exceeds 40%.",
+      "opportunity_description": "Need robust aggregation protocols for high-dropout mobile environments.",
+      "paper_title": "Predictive client selection for volatile federated networks",
+      "paper_abstract": "Instead of modifying the aggregation protocol to handle dropped clients, we propose a machine learning model that predicts client reliability beforehand. By only selecting stable clients, we circumvent the aggregation bottleneck entirely.",
+      "paper_excerpt": "Instead of modifying the aggregation protocol... we propose a machine learning model that predicts client reliability"
+    },
+    "expected_relationship": "EXTENDS"
+  },
+  {
+    "id": "fix_15",
+    "description": "Clear UNRELATED: discusses a different domain",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Lack of longitudinal studies on intermittent fasting in older adults",
+      "opportunity_problem_statement": "Most studies on intermittent fasting focus on short-term outcomes in young populations.",
+      "opportunity_description": "We need 5+ year studies assessing bone density and muscle mass in patients over 65.",
+      "paper_title": "Short-term metabolic impacts of the ketogenic diet in adolescents",
+      "paper_abstract": "A 3-week study of the ketogenic diet on teenagers showed rapid weight loss and improved insulin sensitivity.",
+      "paper_excerpt": "3-week study of the ketogenic diet on teenagers"
+    },
+    "expected_relationship": "UNRELATED"
+  },
+  {
+    "id": "fix_16",
+    "description": "Borderline SUPPORTS: indirectly supports via animal models",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Lack of longitudinal studies on intermittent fasting in older adults",
+      "opportunity_problem_statement": "Most studies on intermittent fasting focus on short-term outcomes in young populations.",
+      "opportunity_description": "We need 5+ year studies assessing bone density and muscle mass in patients over 65.",
+      "paper_title": "Lifespan fasting in mice exacerbates age-related bone loss",
+      "paper_abstract": "Mice subjected to lifelong intermittent fasting showed severe osteoporosis in old age. These alarming preclinical findings underscore the critical missing data regarding long-term fasting safety in human geriatric populations.",
+      "paper_excerpt": "underscore the critical missing data regarding long-term fasting safety in human geriatric populations."
+    },
+    "expected_relationship": "SUPPORTS"
+  },
+  {
+    "id": "fix_17",
+    "description": "Clear ADDRESSES: directly tackles the issue with a relevant population",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Lack of longitudinal studies on intermittent fasting in older adults",
+      "opportunity_problem_statement": "Most studies on intermittent fasting focus on short-term outcomes in young populations.",
+      "opportunity_description": "We need 5+ year studies assessing bone density and muscle mass in patients over 65.",
+      "paper_title": "A decade of intermittent fasting: effects on skeletal health in postmenopausal women",
+      "paper_abstract": "We followed 200 postmenopausal women (ages 60-75) practicing 16:8 fasting for 10 years. DXA scans revealed accelerated bone mineral density loss compared to age-matched controls.",
+      "paper_excerpt": "followed 200 postmenopausal women (ages 60-75) practicing 16:8 fasting for 10 years"
+    },
+    "expected_relationship": "ADDRESSES"
+  },
+  {
+    "id": "fix_18",
+    "description": "Borderline CONTRADICTS: refutes the need for long-term studies",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Lack of longitudinal studies on intermittent fasting in older adults",
+      "opportunity_problem_statement": "Most studies on intermittent fasting focus on short-term outcomes in young populations.",
+      "opportunity_description": "We need 5+ year studies assessing bone density and muscle mass in patients over 65.",
+      "paper_title": "Short-term biomarkers perfectly predict long-term bone health in fasting",
+      "paper_abstract": "Our validation study shows that 4-week changes in serum osteocalcin during fasting predict 10-year bone density trajectories with 99% accuracy. Thus, expensive multi-year longitudinal studies are no longer necessary to assess fasting safety in seniors.",
+      "paper_excerpt": "expensive multi-year longitudinal studies are no longer necessary to assess fasting safety in seniors."
+    },
+    "expected_relationship": "CONTRADICTS"
+  },
+  {
+    "id": "fix_19",
+    "description": "Clear EXTENDS: looks at a different diet in the same demographic",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Lack of longitudinal studies on intermittent fasting in older adults",
+      "opportunity_problem_statement": "Most studies on intermittent fasting focus on short-term outcomes in young populations.",
+      "opportunity_description": "We need 5+ year studies assessing bone density and muscle mass in patients over 65.",
+      "paper_title": "Longitudinal impacts of the Mediterranean diet on bone mass in the elderly",
+      "paper_abstract": "While intermittent fasting lacks long-term data in older populations, we shifted focus to dietary composition. Our 6-year study demonstrates the Mediterranean diet preserves bone density in patients over 70.",
+      "paper_excerpt": "we shifted focus to dietary composition. Our 6-year study demonstrates the Mediterranean diet preserves bone density"
+    },
+    "expected_relationship": "EXTENDS"
+  },
+  {
+    "id": "fix_20",
+    "description": "Clear UNRELATED: completely unrelated field",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Lack of longitudinal studies on intermittent fasting in older adults",
+      "opportunity_problem_statement": "Most studies on intermittent fasting focus on short-term outcomes in young populations.",
+      "opportunity_description": "We need 5+ year studies assessing bone density and muscle mass in patients over 65.",
+      "paper_title": "The economic impact of cryptocurrency mining in rural communities",
+      "paper_abstract": "We analyze the strain on local power grids caused by Bitcoin mining operations in upstate New York.",
+      "paper_excerpt": "Bitcoin mining operations"
+    },
+    "expected_relationship": "UNRELATED"
+  },
+  {
+    "id": "fix_21",
+    "description": "Clear ADDRESSES: addresses network unreliability in FL",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Scalability bottlenecks in federated learning over unreliable networks",
+      "opportunity_problem_statement": "Current FL protocols fail when client dropout exceeds 40%.",
+      "opportunity_description": "Need robust aggregation protocols for high-dropout mobile environments.",
+      "paper_title": "DropTolerant FL: Surviving extreme network partitions",
+      "paper_abstract": "We present DropTolerant FL, an aggregation algorithm designed specifically for scenarios with up to 80% client dropout in unreliable networks. It ensures consistent model updates despite extreme packet loss.",
+      "paper_excerpt": "aggregation algorithm designed specifically for scenarios with up to 80% client dropout"
+    },
+    "expected_relationship": "ADDRESSES"
+  },
+  {
+    "id": "fix_22",
+    "description": "Clear EXTENDS: applies to a new dimension (energy instead of networks)",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Scalability bottlenecks in federated learning over unreliable networks",
+      "opportunity_problem_statement": "Current FL protocols fail when client dropout exceeds 40%.",
+      "opportunity_description": "Need robust aggregation protocols for high-dropout mobile environments.",
+      "paper_title": "Energy-constrained aggregation in federated learning",
+      "paper_abstract": "While unreliable networks are a known bottleneck, we argue energy constraints are equally pressing. We design an aggregation protocol tailored for IoT devices with limited battery life, a related but distinct scalability challenge.",
+      "paper_excerpt": "We design an aggregation protocol tailored for IoT devices with limited battery life, a related but distinct scalability challenge."
+    },
+    "expected_relationship": "EXTENDS"
+  },
+  {
+    "id": "fix_23",
+    "description": "Borderline CONTRADICTS: implies the problem is solved in a different layer",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Scalability bottlenecks in federated learning over unreliable networks",
+      "opportunity_problem_statement": "Current FL protocols fail when client dropout exceeds 40%.",
+      "opportunity_description": "Need robust aggregation protocols for high-dropout mobile environments.",
+      "paper_title": "TCP-level reliability handles FL dropouts seamlessly",
+      "paper_abstract": "By optimizing the transport layer rather than the application layer, we show that standard TCP extensions perfectly mask client dropouts from the FL aggregator, negating the need for novel FL aggregation protocols.",
+      "paper_excerpt": "negating the need for novel FL aggregation protocols."
+    },
+    "expected_relationship": "CONTRADICTS"
+  },
+  {
+    "id": "fix_24",
+    "description": "Clear UNRELATED: focuses on computer vision models",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Scalability bottlenecks in federated learning over unreliable networks",
+      "opportunity_problem_statement": "Current FL protocols fail when client dropout exceeds 40%.",
+      "opportunity_description": "Need robust aggregation protocols for high-dropout mobile environments.",
+      "paper_title": "A new dataset for object detection in foggy environments",
+      "paper_abstract": "We release a dataset of 50,000 annotated images captured in dense fog to improve autonomous driving safety.",
+      "paper_excerpt": "dataset of 50,000 annotated images"
+    },
+    "expected_relationship": "UNRELATED"
+  },
+  {
+    "id": "fix_25",
+    "description": "Clear SUPPORTS: confirms the failure of protocols",
+    "label_source": "human_curated_pilot",
+    "input": {
+      "opportunity_title": "Scalability bottlenecks in federated learning over unreliable networks",
+      "opportunity_problem_statement": "Current FL protocols fail when client dropout exceeds 40%.",
+      "opportunity_description": "Need robust aggregation protocols for high-dropout mobile environments.",
+      "paper_title": "Why federated learning fails in rural areas",
+      "paper_abstract": "Our deployment of standard FL in rural India failed completely. Due to spotty mobile connections causing 50% dropout, aggregation never completed a single round, highlighting the dire lack of resilient protocols.",
+      "paper_excerpt": "highlighting the dire lack of resilient protocols."
+    },
+    "expected_relationship": "SUPPORTS"
+  }
+]

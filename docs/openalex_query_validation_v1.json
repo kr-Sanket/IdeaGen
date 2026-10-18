@@ -1,0 +1,257 @@
+[
+  {
+    "query_id": "Candidate A (Frozen)",
+    "exact_filters": {
+      "default.search": "retrieval-augmented generation hallucination|faithfulness|grounding|factuality"
+    },
+    "raw_count": 884468,
+    "filtered_count": 484771,
+    "temporal_counts": {
+      "Batch 0": 352624,
+      "2025 Q1": 22232,
+      "2025 Q2": 24037,
+      "2025 Q3": 22398,
+      "2025 Q4": 20186,
+      "2026 H1": 43294
+    },
+    "samples": [
+      {
+        "id": "https://openalex.org/W4376652817",
+        "title": "Zero-shot Faithful Factual Error Correction",
+        "doi": "https://doi.org/10.48550/arxiv.2305.07982",
+        "type": "preprint"
+      },
+      {
+        "id": "https://openalex.org/W4399021912",
+        "title": "Improving Faithfulness and Factuality with Contrastive Learning in Explainable Recommendation",
+        "doi": "https://doi.org/10.1145/3653984",
+        "type": "article"
+      },
+      {
+        "id": "https://openalex.org/W7139949253",
+        "title": "Fine-tuning small language models for industrial retrieval-augmented generation: Efficiency, factuality, and hallucination analysis",
+        "doi": "https://doi.org/10.1016/j.csi.2026.104163",
+        "type": "article"
+      },
+      {
+        "id": "https://openalex.org/W7167665713",
+        "title": "Real-time Prevention of Factual Hallucinations in Retrieval-Augmented Generation",
+        "doi": "https://doi.org/10.34726/hss.2026.137481",
+        "type": "article"
+      },
+      {
+        "id": "https://openalex.org/W7128429462",
+        "title": "ISFJ-RAG: Interventional Suppression of Hallucinations via Counter-Factual Joint Decoding Retrieval-Augment Generation",
+        "doi": "https://doi.org/10.3390/bdcc10020056",
+        "type": "article"
+      },
+      {
+        "id": "https://openalex.org/W3214124396",
+        "title": "CLIFF: Contrastive Learning for Improving Faithfulness and Factuality in Abstractive Summarization",
+        "doi": "https://doi.org/10.48550/arxiv.2109.09209",
+        "type": "preprint"
+      },
+      {
+        "id": "https://openalex.org/W4378765267",
+        "title": "FACTUAL: A Benchmark for Faithful and Consistent Textual Scene Graph Parsing",
+        "doi": "https://doi.org/10.48550/arxiv.2305.17497",
+        "type": "preprint"
+      },
+      {
+        "id": "https://openalex.org/W4393757382",
+        "title": "Is Factuality Enhancement a Free Lunch For LLMs? Better Factuality Can Lead to Worse Context-Faithfulness",
+        "doi": "https://doi.org/10.48550/arxiv.2404.00216",
+        "type": "preprint"
+      },
+      {
+        "id": "https://openalex.org/W4368755509",
+        "title": "Background Knowledge Grounding for Readable, Relevant, and Factual Biomedical Lay Summaries",
+        "doi": "https://doi.org/10.48550/arxiv.2305.02104",
+        "type": "preprint"
+      },
+      {
+        "id": "https://openalex.org/W4308021404",
+        "title": "FRSUM: Towards Faithful Abstractive Summarization via Enhancing Factual Robustness",
+        "doi": "https://doi.org/10.48550/arxiv.2211.00294",
+        "type": "preprint"
+      }
+    ],
+    "metadata_quality": {
+      "total_samples": 10,
+      "has_doi": 10,
+      "is_preprint": 6,
+      "has_abstract": 10
+    },
+    "errors": []
+  },
+  {
+    "query_id": "Candidate B",
+    "exact_filters": {
+      "default.search": "\"retrieval-augmented generation\" AND (hallucination OR faithfulness OR grounding OR factuality)"
+    },
+    "raw_count": 30316,
+    "filtered_count": 11475,
+    "temporal_counts": {
+      "Batch 0": 4551,
+      "2025 Q1": 1031,
+      "2025 Q2": 1325,
+      "2025 Q3": 1065,
+      "2025 Q4": 1022,
+      "2026 H1": 2481
+    },
+    "samples": [
+      {
+        "id": "https://openalex.org/W4415044773",
+        "title": "A Survey on Hallucination in Large Language Models: Definitions, Detection, and Mitigation",
+        "doi": "https://doi.org/10.20944/preprints202510.0540.v1",
+        "type": "preprint"
+      },
+      {
+        "id": "https://openalex.org/W4403702563",
+        "title": "Trustworthiness in Retrieval-Augmented Generation Systems: A Survey",
+        "doi": "https://doi.org/10.48550/arxiv.2409.10102",
+        "type": "preprint"
+      },
+      {
+        "id": "https://openalex.org/W4389984066",
+        "title": "Retrieval-Augmented Generation for Large Language Models: A Survey",
+        "doi": "https://doi.org/10.48550/arxiv.2312.10997",
+        "type": "preprint"
+      },
+      {
+        "id": "https://openalex.org/W4402705250",
+        "title": "Measuring text summarization factuality using atomic facts entailment metrics in the context of retrieval augmented generation",
+        "doi": "https://doi.org/10.48550/arxiv.2408.15171",
+        "type": "preprint"
+      },
+      {
+        "id": "https://openalex.org/W4415544485",
+        "title": "Development and Evaluation of a Retrieval-Augmented Generation Chatbot for Orthopedic and Trauma Surgery Patient Education: Mixed-Methods Study",
+        "doi": "https://doi.org/10.2196/75262",
+        "type": "article"
+      },
+      {
+        "id": "https://openalex.org/W4416510422",
+        "title": "LLM-Assisted Question-Answering on Technical Documents Using Structured Data-Aware Retrieval Augmented Generation",
+        "doi": "https://doi.org/10.48550/arxiv.2506.23136",
+        "type": "preprint"
+      },
+      {
+        "id": "https://openalex.org/W7139949253",
+        "title": "Fine-tuning small language models for industrial retrieval-augmented generation: Efficiency, factuality, and hallucination analysis",
+        "doi": "https://doi.org/10.1016/j.csi.2026.104163",
+        "type": "article"
+      },
+      {
+        "id": "https://openalex.org/W4417069106",
+        "title": "An Analysis of Decoding Methods for LLM-based Agents for Faithful Multi-Hop Question Answering",
+        "doi": "https://doi.org/10.48550/arxiv.2503.23415",
+        "type": "preprint"
+      },
+      {
+        "id": "https://openalex.org/W4408323770",
+        "title": "Enhancing the Precision and Interpretability of Retrieval-Augmented Generation (RAG) in Legal Technology: A Survey",
+        "doi": "https://doi.org/10.1109/access.2025.3550145",
+        "type": "article"
+      },
+      {
+        "id": "https://openalex.org/W4411065983",
+        "title": "Retrieval-Augmented Generation and Hallucination in Large Language Models: A Scholarly Overview",
+        "doi": "https://doi.org/10.36347/sjet.2025.v13i05.003",
+        "type": "article"
+      }
+    ],
+    "metadata_quality": {
+      "total_samples": 10,
+      "has_doi": 10,
+      "is_preprint": 6,
+      "has_abstract": 10
+    },
+    "errors": []
+  },
+  {
+    "query_id": "Candidate C",
+    "exact_filters": {
+      "default.search": "retrieval-augmented generation AND (hallucination OR faithfulness OR grounding OR factuality)"
+    },
+    "raw_count": 53528,
+    "filtered_count": 22678,
+    "temporal_counts": {
+      "Batch 0": 12150,
+      "2025 Q1": 1588,
+      "2025 Q2": 2116,
+      "2025 Q3": 1683,
+      "2025 Q4": 1572,
+      "2026 H1": 3569
+    },
+    "samples": [
+      {
+        "id": "https://openalex.org/W4415044773",
+        "title": "A Survey on Hallucination in Large Language Models: Definitions, Detection, and Mitigation",
+        "doi": "https://doi.org/10.20944/preprints202510.0540.v1",
+        "type": "preprint"
+      },
+      {
+        "id": "https://openalex.org/W4403702563",
+        "title": "Trustworthiness in Retrieval-Augmented Generation Systems: A Survey",
+        "doi": "https://doi.org/10.48550/arxiv.2409.10102",
+        "type": "preprint"
+      },
+      {
+        "id": "https://openalex.org/W4402705250",
+        "title": "Measuring text summarization factuality using atomic facts entailment metrics in the context of retrieval augmented generation",
+        "doi": "https://doi.org/10.48550/arxiv.2408.15171",
+        "type": "preprint"
+      },
+      {
+        "id": "https://openalex.org/W4415544485",
+        "title": "Development and Evaluation of a Retrieval-Augmented Generation Chatbot for Orthopedic and Trauma Surgery Patient Education: Mixed-Methods Study",
+        "doi": "https://doi.org/10.2196/75262",
+        "type": "article"
+      },
+      {
+        "id": "https://openalex.org/W4405783670",
+        "title": "Improving Factuality with Explicit Working Memory",
+        "doi": "https://doi.org/10.48550/arxiv.2412.18069",
+        "type": "preprint"
+      },
+      {
+        "id": "https://openalex.org/W4389984066",
+        "title": "Retrieval-Augmented Generation for Large Language Models: A Survey",
+        "doi": "https://doi.org/10.48550/arxiv.2312.10997",
+        "type": "preprint"
+      },
+      {
+        "id": "https://openalex.org/W4313459318",
+        "title": "FaithDial : A Faithful Benchmark for Information-Seeking Dialogue",
+        "doi": "https://doi.org/10.1162/tacl_a_00529",
+        "type": "article"
+      },
+      {
+        "id": "https://openalex.org/W4225301035",
+        "title": "Faithful to the Document or to the World? Mitigating Hallucinations via Entity-linked Knowledge in Abstractive Summarization",
+        "doi": "https://doi.org/10.48550/arxiv.2204.13761",
+        "type": "preprint"
+      },
+      {
+        "id": "https://openalex.org/W4417069106",
+        "title": "An Analysis of Decoding Methods for LLM-based Agents for Faithful Multi-Hop Question Answering",
+        "doi": "https://doi.org/10.48550/arxiv.2503.23415",
+        "type": "preprint"
+      },
+      {
+        "id": "https://openalex.org/W4391221150",
+        "title": "Almanac \u2014 Retrieval-Augmented Language Models for Clinical Medicine",
+        "doi": "https://doi.org/10.1056/aioa2300068",
+        "type": "article"
+      }
+    ],
+    "metadata_quality": {
+      "total_samples": 10,
+      "has_doi": 10,
+      "is_preprint": 7,
+      "has_abstract": 10
+    },
+    "errors": []
+  }
+]

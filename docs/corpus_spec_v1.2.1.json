@@ -1,0 +1,33 @@
+{
+  "corpus_specification_version": "1.2.1",
+  "domain": "RAG / LLM reliability / hallucination / faithfulness / grounding / factuality",
+  "primary_source": "OpenAlex Snapshot (CORE Corpus only)",
+  "query_semantics": {
+    "scope": ["title", "abstract"],
+    "required_phrase": "retrieval-augmented generation",
+    "or_terms": ["hallucination", "faithfulness", "grounding", "factuality"],
+    "matching_rules": {
+      "case_sensitive": false,
+      "unicode_normalized": true,
+      "full_text_search": false,
+      "punctuation_normalized": false
+    }
+  },
+  "filters": {
+    "publication_date_min": "2019-01-01",
+    "publication_date_max": "2026-06-30",
+    "type": ["article", "preprint"],
+    "language": "en",
+    "has_abstract": true,
+    "is_retracted": false,
+    "is_xpac": false
+  },
+  "temporal_batches": [
+    {"id": "0", "start": "2019-01-01", "end": "2024-12-31"},
+    {"id": "1", "start": "2025-01-01", "end": "2025-03-31"},
+    {"id": "2", "start": "2025-04-01", "end": "2025-06-30"},
+    {"id": "3", "start": "2025-07-01", "end": "2025-09-30"},
+    {"id": "4", "start": "2025-10-01", "end": "2025-12-31"},
+    {"id": "5", "start": "2026-01-01", "end": "2026-06-30"}
+  ]
+}

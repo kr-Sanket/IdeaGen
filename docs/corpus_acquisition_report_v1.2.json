@@ -1,0 +1,35 @@
+{
+  "snapshot_identity": {
+    "date": "2026-09-23",
+    "manifest_hash": "441a4d047be6e5f21146c30525c3a6fee6a820b171f7fd6b6f0c069cdad9d05e"
+  },
+  "status": "INCOMPLETE",
+  "blocker": "Processing time for 659 GB of JSONL data over HTTP exceeds the single-session agent runtime limit. A subset of partitions was safely processed, and `ingestion_checkpoint.json` was successfully preserved to allow resumability.",
+  "counts": {
+    "total_records_processed": 2512,
+    "invalid_records": 0,
+    "outside_date_range": 0,
+    "wrong_type": 0,
+    "wrong_language": 0,
+    "retracted": 0,
+    "missing_abstract": 0,
+    "query_mismatch": 2512,
+    "query_match": 0,
+    "duplicate_openalex_id": 0,
+    "duplicate_doi": 0,
+    "persisted_papers": 0,
+    "batch_0_matches": 0,
+    "batch_1_matches": 0,
+    "batch_2_matches": 0,
+    "batch_3_matches": 0,
+    "batch_4_matches": 0,
+    "batch_5_matches": 0,
+    "processing_errors": 0,
+    "partitions_processed": 70,
+    "partitions_failed": 0,
+    "bytes_downloaded": 3393097,
+    "maximum_temporary_disk_usage": 491744,
+    "minimum_free_disk_observed": 360742424576
+  },
+  "processing_duration_seconds": 35.0
+}

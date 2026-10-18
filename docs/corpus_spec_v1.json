@@ -1,0 +1,71 @@
+{
+  "version": "1.0",
+  "source": "OpenAlex",
+  "domain": "RAG / LLM reliability / hallucination / faithfulness / grounding / factuality",
+  "date_range": {
+    "start": "2019-01-01",
+    "end": "2026-06-30",
+    "inclusive": true
+  },
+  "temporal_batches": [
+    {"batch_id": 0, "start": "2019-01-01", "end": "2024-12-31"},
+    {"batch_id": 1, "start": "2025-01-01", "end": "2025-03-31"},
+    {"batch_id": 2, "start": "2025-04-01", "end": "2025-06-30"},
+    {"batch_id": 3, "start": "2025-07-01", "end": "2025-09-30"},
+    {"batch_id": 4, "start": "2025-10-01", "end": "2025-12-31"},
+    {"batch_id": 5, "start": "2026-01-01", "end": "2026-06-30"}
+  ],
+  "query": {
+    "expression": "retrieval-augmented generation hallucination|faithfulness|grounding|factuality",
+    "semantics": "OpenAlex default search behavior. Phrase matching and OR semantics explicitly provided in the query string via pipe '|' operator. Searches within title, abstract, and full-text index as supported by OpenAlex `/works?search=` parameter."
+  },
+  "filters": {
+    "publication_date_range": ["2019-01-01", "2026-06-30"],
+    "type": ["article", "preprint"],
+    "language": "en",
+    "has_abstract": true,
+    "is_retracted": false
+  },
+  "abstract_policy": {
+    "rule": "A paper must have a reconstructable usable abstract for inclusion in the extraction corpus.",
+    "mechanism": "Inverted-index abstracts from OpenAlex are reconstructed using the provided positional mapping. If reconstruction fails or yields an unusable empty string, the paper is excluded from downstream extraction processing.",
+    "provenance": "Rejected papers remain observable through ingestion statistics/logs, preserving the audit trail."
+  },
+  "identity_policy": {
+    "namespace": "(source_type, source_id) serves as the primary composite key.",
+    "doi": "DOI is an independent identifier. Missing DOIs must not cause false merging.",
+    "manual_uploads": "Manual uploads have their own isolated source namespace.",
+    "duplicates": "Strict constraints on duplicate (source_type, source_id) reject/merge identical source artifacts. Title similarity/possible duplicates do not trigger automatic merging."
+  },
+  "preprint_policy": {
+    "eligibility": "Both 'article' and 'preprint' types are eligible.",
+    "temporal_date": "publication_date dictates the temporal timeline assignment.",
+    "linkage": "Preprint/published linkages are NOT automatically resolved unless a deterministic rule exists. The same scientific work appearing as preprint and article may exist as distinct records. (Open Risk/Limitation)"
+  },
+  "language_policy": "Strictly limited to English ('en') via OpenAlex metadata filters. No additional language detection is claimed beyond this metadata filter.",
+  "retraction_policy": "is_retracted = false. Retracted works are excluded. Provenance of rejection is retained in ingestion logs.",
+  "leakage_policy": "Strict temporal cutoff. Only papers whose publication_date is within the permitted historical cutoff (batch boundaries) may influence discovery, creation, retrieval, classification, or transition. Future papers present in the database are explicitly filtered.",
+  "embedding_leakage": "Unresolved Risk: An embedding model pretrained on information post-dating the evaluation period could theoretically introduce knowledge leakage. Currently marked as a known limitation until model selection is finalized.",
+  "llm_leakage": "Unresolved Risk: Modern LLMs evaluating historical papers may possess future knowledge from their pretraining. This methodological risk is acknowledged as a limitation independent of strict paper-level retrieval cutoff.",
+  "validation_checklist": [
+    "all papers within date range",
+    "temporal batches correct",
+    "type filter correct",
+    "language filter correct",
+    "abstract requirement satisfied",
+    "retracted papers excluded",
+    "duplicate policy applied",
+    "source provenance retained",
+    "OpenAlex IDs retained",
+    "DOI normalization applied",
+    "raw metadata retained",
+    "abstract reconstruction validated",
+    "batch counts recorded",
+    "metadata completeness recorded",
+    "random/sample relevance audit completed",
+    "no future-paper leakage",
+    "acquisition configuration recorded"
+  ],
+  "status": "SPECIFICATION_FROZEN",
+  "notes": "This document freezes the corpus specification criteria only. The actual OpenAlex acquisition has not been executed, and the dataset itself is not yet frozen. The final paper count is an empirical outcome of these rules."
+}

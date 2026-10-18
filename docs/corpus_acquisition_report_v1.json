@@ -1,0 +1,71 @@
+{
+  "corpus_specification_version": "1.1",
+  "exact_query": "\"retrieval-augmented generation\" AND (hallucination OR faithfulness OR grounding OR factuality)",
+  "exact_filters": {
+    "from_publication_date": "2019-01-01",
+    "to_publication_date": "2026-06-30",
+    "type": "article|preprint",
+    "language": "en",
+    "has_abstract": "true",
+    "is_retracted": "false",
+    "default.search": "\"retrieval-augmented generation\" AND (hallucination OR faithfulness OR grounding OR factuality)"
+  },
+  "acquisition_method": "OpenAlexClient cursor pagination",
+  "resumability_supported": "No (Full restart required on failure)",
+  "rate_limit_behavior": "Bounded exponential backoff and jitter per OpenAlexClient",
+  "start_time": "2026-10-05T15:42:39.177548",
+  "end_time": "2026-10-05T15:42:39.358470",
+  "statistics": {
+    "raw_observed": 0,
+    "retained": 0,
+    "rejected": 0,
+    "duplicates": 0,
+    "missing_doi": 0,
+    "with_doi": 0,
+    "missing_abstract_metadata": 0,
+    "failed_abstract_reconstruction": 0,
+    "successful_abstract_reconstruction": 0,
+    "article_count": 0,
+    "preprint_count": 0,
+    "batches": {
+      "Batch 0": {
+        "raw": 0,
+        "retained": 0,
+        "rejected": 0
+      },
+      "2025 Q1": {
+        "raw": 0,
+        "retained": 0,
+        "rejected": 0
+      },
+      "2025 Q2": {
+        "raw": 0,
+        "retained": 0,
+        "rejected": 0
+      },
+      "2025 Q3": {
+        "raw": 0,
+        "retained": 0,
+        "rejected": 0
+      },
+      "2025 Q4": {
+        "raw": 0,
+        "retained": 0,
+        "rejected": 0
+      },
+      "2026 H1": {
+        "raw": 0,
+        "retained": 0,
+        "rejected": 0
+      }
+    },
+    "errors": [
+      "Fatal error: Rate limit requested too long a sleep: 29841.0s"
+    ]
+  },
+  "relevance_audit_samples": [],
+  "validation_status": "BLOCKED",
+  "validation_blocked_reasons": [
+    "Errors encountered during acquisition"
+  ]
+}

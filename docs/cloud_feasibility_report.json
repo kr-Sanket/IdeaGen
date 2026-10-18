@@ -1,0 +1,48 @@
+{
+  "status": "EVALUATED",
+  "recommendation_made": true,
+  "cloud_resources_created": false,
+  "charges_incurred": 0.0,
+  "bucket_region": "us-east-1",
+  
+  "provider_comparison": {
+    "aws_ec2": "High flexibility, simple multiprocessing script, very low cost if used ephemerally.",
+    "aws_batch": "Excellent for 2040 parallel jobs, but high setup overhead (Docker, ECR, IAM, Compute Environments). Overkill for a <2-hour total workload.",
+    "aws_lambda": "15-minute timeout risks interrupting the largest 900MB partitions. Aggregating 2040 distinct outputs introduces unnecessary map-reduce complexity.",
+    "winner": "AWS EC2 (Single 16-vCPU instance)"
+  },
+  
+  "recommended_architecture": {
+    "provider": "AWS",
+    "instance_class": "c7g.4xlarge (Graviton3) or c6i.4xlarge (Intel)",
+    "vcpus": 16,
+    "ram": "32 GiB",
+    "temporary_disk": "100 GB EBS gp3",
+    "parallelism": "16 concurrent Python workers via `multiprocessing.Pool`"
+  },
+  
+  "expected_metrics": {
+    "runtime": "~1.5 to 2.5 hours",
+    "filter_reduction_estimate": "Out of 476M records, we expect ~2,000-5,000 matches for the highly specific RAG hallucination domain since 2019.",
+    "output_artifact_size": "~10-20 MB uncompressed (~3-5 MB compressed JSONL.gz)"
+  },
+  
+  "cost_estimate": {
+    "compute": "$1.16 (2 hours of c7g.4xlarge at $0.58/hr)",
+    "ebs_storage": "$0.26 (100 GB gp3 prorated for 1 day)",
+    "data_transfer_s3_to_ec2": "$0.00 (Intra-region us-east-1 traffic is free)",
+    "data_transfer_ec2_to_local": "$0.00 (10 MB is well within free tier)",
+    "total_estimated_cost": "< $2.00 USD"
+  },
+  
+  "artifact_strategy": {
+    "format": "JSONL.gz",
+    "rationale": "Preserves the complete nested structure for `PaperCreateDTO` mapping locally, natively streaming-friendly, highly compressed.",
+    "transfer_back": "Secure SCP/SFTP direct download from the EC2 instance to `D:\\IdeaGen_\\IdeaGen\\backend\\data\\`, followed by immediate EC2 termination."
+  },
+  
+  "reproducibility_and_checkpointing": {
+    "checkpointing": "A local SQLite or JSON file on the EC2 instance tracks partition indices. A partition is marked 'DONE' only after its local JSONL fragment is fully written and flushed to disk.",
+    "provenance_metadata": "The final artifact will be accompanied by a `metadata.json` containing the snapshot hash, manifest date, spec v1.2.1, git commit of the filter script, and exact record rejection statistics."
+  }
+}
