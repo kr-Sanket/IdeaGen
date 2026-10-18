@@ -372,7 +372,7 @@ def generate_opportunity_from_gap(gap_id: uuid.UUID, db: Session = Depends(get_d
     # Fetch statement texts
     supporting_stmts = db.query(ResearchStatement).filter(ResearchStatement.id.in_(stmt_ids)).all() if stmt_ids else []
     stmt_texts = [s.statement_text for s in supporting_stmts]
-    methods = [s.statement_text for s in supporting_stmts if s.statement_type in {"METHODOLOGY", "BASELINE"}]
+    methods = [s.statement_text for s in supporting_stmts if s.statement_type in {"METHOD", "METHODOLOGY", "BASELINE"}]
 
     input_dto = ResearchOpportunityInputDTO(
         gap_id=gap.id,
@@ -391,13 +391,12 @@ def generate_opportunity_from_gap(gap_id: uuid.UUID, db: Session = Depends(get_d
     dimension = embedder.dimension
     vector_index = StatementVectorIndex(dimension=dimension)
 
-    # Populate FAISS index from db statements
+    # Populate FAISS index from db statements using genuine embeddings
     all_stmts = db.query(ResearchStatement).all()
     if all_stmts:
-        import numpy as np
-        # Build simple initial embeddings for retrieval
-        dummy_vecs = np.random.randn(len(all_stmts), dimension).astype(np.float32)
-        vector_index.add_statements(all_stmts, dummy_vecs)
+        stmt_texts_to_embed = [s.statement_text for s in all_stmts]
+        stmt_vectors = embedder.embed_texts(stmt_texts_to_embed)
+        vector_index.add_statements(all_stmts, stmt_vectors)
 
     llm = get_default_llm_provider()
     pipeline = ResearchOpportunityPipeline(

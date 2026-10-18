@@ -1,6 +1,4 @@
-"""Tests for Phase 6 API Endpoints, Workspace Stats, and Opportunity Reports."""
-
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 import pytest
 import uuid
 import datetime
@@ -23,6 +21,7 @@ from ideagen.db.models import (
 )
 from ideagen.db import get_db
 from ideagen.api.main import app
+from ideagen.generation.pipeline import ResearchOpportunityPipeline
 
 
 class FakeEmbeddingProvider:
@@ -30,6 +29,7 @@ class FakeEmbeddingProvider:
 
     def __init__(self, model_name: str = "fake-all-MiniLM-L6-v2"):
         self._model_name = model_name
+        self.call_history: list[list[str]] = []
 
     @property
     def dimension(self) -> int:
@@ -40,9 +40,13 @@ class FakeEmbeddingProvider:
         return self._model_name
 
     def embed_texts(self, texts: list[str]) -> np.ndarray:
+        self.call_history.append(list(texts))
         if not texts:
             return np.empty((0, self.dimension), dtype=np.float32)
-        return np.zeros((len(texts), self.dimension), dtype=np.float32)
+        vecs = np.zeros((len(texts), self.dimension), dtype=np.float32)
+        for i in range(len(texts)):
+            vecs[i, (i + 1) % self.dimension] = 1.0
+        return vecs
 
 
 from tests.opportunity.fake_provider import FakeLLMProvider
@@ -218,6 +222,8 @@ def test_db():
         "gap_id": gap_id,
         "opp_id": opp_id,
         "stmt_id": stmt_id,
+        "knowledge_id": knowledge.id,
+        "session_maker": SessionMaker,
     }
 
     app.dependency_overrides.clear()
@@ -321,3 +327,199 @@ def test_generate_opportunity_endpoint_uses_configured_provider(test_db):
     assert report["identified_gap"] == "Unquantified hallucination accumulation in multi-hop RAG"
     assert "proposed_research_direction" in report
     assert len(report["supporting_papers"]) == 1
+
+
+def test_opportunity_endpoint_never_uses_random_vectors(test_db, mock_pipeline_dependencies):
+    """Requirement 1: Verify the opportunity endpoint never uses random vectors for prior-art search."""
+    client, ids = test_db
+    with patch("numpy.random.randn", side_effect=AssertionError("np.random.randn should never be called")):
+        res = client.post(f"/api/v1/gaps/{ids['gap_id']}/opportunity")
+        assert res.status_code == 200
+
+
+def test_actual_statement_text_passed_to_embedding_provider(test_db, mock_pipeline_dependencies):
+    """Requirement 2 & 3: Actual statement text is passed to the configured embedding provider,
+    preserving vector dimension and statement order."""
+    client, ids = test_db
+    SessionMaker = ids["session_maker"]
+    with SessionMaker() as db:
+        # Add additional statements to verify multi-statement ordering and dimension
+        stmt2 = ResearchStatement(
+            id=uuid.uuid4(),
+            knowledge_id=uuid.uuid4(),
+            paper_id=ids["paper_id"],
+            passage_id=ids["stmt_id"],
+            statement_text="Quantized key-value cache decreases activation memory by 4x.",
+            statement_type="FINDING",
+            confidence=0.95,
+        )
+        db.add(stmt2)
+        db.commit()
+
+        all_stmts = db.query(ResearchStatement).all()
+        expected_texts = [s.statement_text for s in all_stmts]
+
+    mock_pipeline_dependencies.call_history.clear()
+    res = client.post(f"/api/v1/gaps/{ids['gap_id']}/opportunity")
+    assert res.status_code == 200
+
+    # Verify that the configured embedding provider was called with the actual statement texts in DB order
+    assert expected_texts in mock_pipeline_dependencies.call_history
+
+
+def test_empty_statement_collection_handled_safely(test_db, mock_pipeline_dependencies):
+    """Requirement 4: Empty statement collections do not cause an error."""
+    client, ids = test_db
+    SessionMaker = ids["session_maker"]
+    with SessionMaker() as db:
+        # Delete evidence and statements
+        db.query(GapEvidence).delete()
+        db.query(ResearchStatement).delete()
+        db.commit()
+
+    mock_pipeline_dependencies.call_history.clear()
+    res = client.post(f"/api/v1/gaps/{ids['gap_id']}/opportunity")
+    assert res.status_code == 200
+    report = res.json()
+    assert report["identified_gap"] == "Unquantified hallucination accumulation in multi-hop RAG"
+
+
+def test_method_statements_included_in_opportunity_inputs(test_db):
+    """Requirement 5: METHOD, METHODOLOGY, and BASELINE statements are included in opportunity-generation inputs."""
+    client, ids = test_db
+    SessionMaker = ids["session_maker"]
+    with SessionMaker() as db:
+        method_stmt = ResearchStatement(
+            id=uuid.uuid4(),
+            knowledge_id=ids["knowledge_id"],
+            paper_id=ids["paper_id"],
+            statement_text="Adaptive semantic beam search with step-level entropy thresholding.",
+            statement_type="METHOD",
+            confidence=0.9,
+        )
+        methodology_stmt = ResearchStatement(
+            id=uuid.uuid4(),
+            knowledge_id=ids["knowledge_id"],
+            paper_id=ids["paper_id"],
+            statement_text="Dual-encoder retrieval with dense passage cross-attention.",
+            statement_type="METHODOLOGY",
+            confidence=0.9,
+        )
+        baseline_stmt = ResearchStatement(
+            id=uuid.uuid4(),
+            knowledge_id=ids["knowledge_id"],
+            paper_id=ids["paper_id"],
+            statement_text="BM25 sparse inverted index baseline.",
+            statement_type="BASELINE",
+            confidence=0.85,
+        )
+        limitation_stmt = ResearchStatement(
+            id=uuid.uuid4(),
+            knowledge_id=ids["knowledge_id"],
+            paper_id=ids["paper_id"],
+            statement_text="High latency during multi-hop iterative querying.",
+            statement_type="LIMITATION",
+            confidence=0.9,
+        )
+        db.add_all([method_stmt, methodology_stmt, baseline_stmt, limitation_stmt])
+
+        # Link as supporting evidence for gap
+        for s in [method_stmt, methodology_stmt, baseline_stmt, limitation_stmt]:
+            db.add(GapEvidence(
+                id=uuid.uuid4(),
+                gap_id=ids["gap_id"],
+                statement_id=s.id,
+                paper_id=ids["paper_id"],
+                evidence_role="SUPPORTING",
+            ))
+        db.commit()
+
+    captured_inputs = []
+    original_process = ResearchOpportunityPipeline.process_validated_gap
+
+    def spy_process(self, input_dto, **kwargs):
+        captured_inputs.append(input_dto)
+        return original_process(self, input_dto, **kwargs)
+
+    with patch.object(ResearchOpportunityPipeline, "process_validated_gap", side_effect=spy_process, autospec=True):
+        res = client.post(f"/api/v1/gaps/{ids['gap_id']}/opportunity")
+        assert res.status_code == 200
+
+    assert len(captured_inputs) == 1
+    inp = captured_inputs[0]
+    assert "Adaptive semantic beam search with step-level entropy thresholding." in inp.existing_methods
+    assert "Dual-encoder retrieval with dense passage cross-attention." in inp.existing_methods
+    assert "BM25 sparse inverted index baseline." in inp.existing_methods
+    assert "High latency during multi-hop iterative querying." not in inp.existing_methods
+
+
+def test_method_statements_included_in_reports(test_db):
+    """Requirement 6: METHOD, METHODOLOGY, and BASELINE statements are included in reports where applicable."""
+    client, ids = test_db
+    SessionMaker = ids["session_maker"]
+    with SessionMaker() as db:
+        m_stmt = ResearchStatement(
+            id=uuid.uuid4(),
+            knowledge_id=ids["knowledge_id"],
+            paper_id=ids["paper_id"],
+            statement_text="Hierarchical graph clustering with contrastive edge pruning.",
+            statement_type="METHOD",
+            confidence=0.91,
+        )
+        db.add(m_stmt)
+        # Link statement to existing opportunity
+        opp = db.query(ResearchOpportunityRecord).filter(ResearchOpportunityRecord.id == ids["opp_id"]).first()
+        opp.supporting_statement_ids = [str(ids["stmt_id"]), str(m_stmt.id)]
+        db.commit()
+
+    res = client.get(f"/api/v1/opportunities/{ids['opp_id']}/report")
+    assert res.status_code == 200
+    report = res.json()
+    assert "Hierarchical graph clustering with contrastive edge pruning." in report["existing_approaches"]
+
+
+def test_existing_endpoint_contracts_and_gap_status_checks(test_db):
+    """Requirement 7: Existing endpoint contracts and validated-gap status checks remain intact."""
+    client, ids = test_db
+    SessionMaker = ids["session_maker"]
+
+    # 1. Non-existent gap returns 404
+    non_existent_id = uuid.uuid4()
+    res = client.post(f"/api/v1/gaps/{non_existent_id}/opportunity")
+    assert res.status_code == 404
+    assert f"Research gap {non_existent_id} not found" in res.json()["detail"]
+
+    # 2. Non-VALIDATED gap returns 400
+    with SessionMaker() as db:
+        candidate_gap = ResearchGap(
+            id=uuid.uuid4(),
+            gap_statement="Unvalidated hypothesis regarding model pruning",
+            research_problem="Model efficiency",
+            status="CANDIDATE",
+            evidence_count=0,
+        )
+        db.add(candidate_gap)
+        db.commit()
+        candidate_gap_id = candidate_gap.id
+
+    res = client.post(f"/api/v1/gaps/{candidate_gap_id}/opportunity")
+    assert res.status_code == 400
+    assert "must be VALIDATED before opportunity generation" in res.json()["detail"]
+
+    # 3. Validated gap returns 200 and conforms to OpportunityReportDTO contract
+    res = client.post(f"/api/v1/gaps/{ids['gap_id']}/opportunity")
+    assert res.status_code == 200
+    data = res.json()
+    required_keys = [
+        "opportunity_id", "gap_id", "research_problem", "evidence_of_problem",
+        "existing_approaches", "identified_gap", "why_existing_work_is_insufficient",
+        "proposed_research_direction", "reasoning", "technical_approach",
+        "expected_contribution", "feasibility", "prior_art_assessment",
+        "differentiation", "supporting_papers", "supporting_evidence",
+        "confidence", "novelty_assessment", "status", "created_at",
+        "generation_model", "validation_model", "embedding_model",
+        "refinement_iteration_count", "pipeline_version"
+    ]
+    for key in required_keys:
+        assert key in data, f"Missing required contract key: {key}"
+    assert data["status"] == "VALIDATED"

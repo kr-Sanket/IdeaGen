@@ -153,7 +153,7 @@ class OpportunityReportService:
         # 6. Existing Approaches
         existing_approaches: List[str] = []
         for stmt in supporting_statements:
-            if stmt.statement_type in {"METHODOLOGY", "BASELINE"}:
+            if stmt.statement_type in {"METHOD", "METHODOLOGY", "BASELINE"}:
                 existing_approaches.append(stmt.statement_text)
 
         if not existing_approaches:
