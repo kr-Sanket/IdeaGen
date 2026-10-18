@@ -91,14 +91,16 @@ class StatementVectorIndex:
         top_k: int = 5,
         min_similarity: float = 0.0,
     ) -> List[StatementSearchResult]:
-        """Searches the index for the nearest statements using cosine similarity."""
-        if self.total_vectors == 0:
-            return []
-
         # Ensure vector shape (1, D)
         q = query_vector.astype(np.float32)
         if len(q.shape) == 1:
             q = np.expand_dims(q, axis=0)
+
+        if q.shape[1] != self.dimension:
+            raise ValueError(f"Query vector dimension ({q.shape[1]}) does not match index dimension ({self.dimension})")
+
+        if self.total_vectors == 0:
+            return []
 
         faiss.normalize_L2(q)
         k = min(top_k, self.total_vectors)
@@ -161,6 +163,8 @@ class StatementVectorIndex:
 
     def rebuild(self, statements: List[Any], vectors: np.ndarray) -> None:
         """Rebuilds the entire index from scratch with the provided data."""
+        if len(statements) > 0 and vectors.shape[1] != self.dimension:
+            raise ValueError(f"Vector dimension ({vectors.shape[1]}) does not match index dimension ({self.dimension})")
         self.index = faiss.IndexFlatIP(self.dimension)
         self.id_list = []
         self.metadata_store = {}

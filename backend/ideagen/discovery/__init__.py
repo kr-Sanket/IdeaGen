@@ -12,6 +12,7 @@ from .models import (
 )
 from .embeddings import (
     EmbeddingProvider,
+    OllamaEmbeddingProvider,
     GeminiEmbeddingProvider,
     SentenceTransformerEmbeddingProvider,
     get_default_embedding_provider,
@@ -32,6 +33,7 @@ __all__ = [
     "ResearchGapCreateDTO",
     "ResearchGapResponseDTO",
     "EmbeddingProvider",
+    "OllamaEmbeddingProvider",
     "GeminiEmbeddingProvider",
     "SentenceTransformerEmbeddingProvider",
     "get_default_embedding_provider",

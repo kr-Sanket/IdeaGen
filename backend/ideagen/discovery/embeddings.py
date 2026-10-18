@@ -110,9 +110,98 @@ class SentenceTransformerEmbeddingProvider:
         return embeddings.astype(np.float32)
 
 
+class OllamaEmbeddingProvider:
+    """Generates embeddings locally using Ollama embedding models."""
+
+    def __init__(
+        self,
+        base_url: str = "http://localhost:11434",
+        model_name: str = "nomic-embed-text",
+        dimension: int = 768,
+        timeout: float = 60.0,
+    ):
+        self._base_url = base_url.rstrip("/")
+        self._model_name = model_name
+        self._dimension = dimension
+        self._timeout = timeout
+
+    @property
+    def dimension(self) -> int:
+        return self._dimension
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    def embed_texts(self, texts: List[str]) -> np.ndarray:
+        """Embeds a list of texts and returns an (N, D) float32 numpy array with L2 normalization."""
+        if not texts:
+            return np.empty((0, self._dimension), dtype=np.float32)
+
+        import requests
+
+        clean_texts = [t.strip() if t and t.strip() else "statement" for t in texts]
+
+        embed_url = f"{self._base_url}/api/embed"
+        payload = {
+            "model": self._model_name,
+            "input": clean_texts,
+        }
+
+        try:
+            resp = requests.post(embed_url, json=payload, timeout=self._timeout)
+            if resp.status_code == 200:
+                data = resp.json()
+                vectors = data.get("embeddings", [])
+            else:
+                # Fallback to per-item /api/embeddings endpoint if /api/embed is unavailable
+                vectors = []
+                for text in clean_texts:
+                    r = requests.post(
+                        f"{self._base_url}/api/embeddings",
+                        json={"model": self._model_name, "prompt": text},
+                        timeout=self._timeout,
+                    )
+                    if r.status_code != 200:
+                        raise RuntimeError(f"Ollama embedding API error ({r.status_code}): {r.text}")
+                    vectors.append(r.json()["embedding"])
+        except Exception as e:
+            raise RuntimeError(f"Failed to generate Ollama embeddings: {e}") from e
+
+        if not vectors or len(vectors) == 0:
+            raise RuntimeError("Ollama embedding API returned no embeddings.")
+
+        if any(len(v) == 0 for v in vectors):
+            raise RuntimeError("Ollama embedding API returned an empty embedding vector.")
+
+        arr = np.array(vectors, dtype=np.float32)
+        if arr.ndim != 2 or arr.shape[0] == 0:
+            raise RuntimeError("Ollama embedding API returned an invalid embedding array.")
+
+        if arr.shape[1] != self._dimension:
+            raise ValueError(
+                f"Embedding dimension mismatch: expected {self._dimension} (configured for {self._model_name}), "
+                f"but Ollama returned vectors of dimension {arr.shape[1]}."
+            )
+
+        norms = np.linalg.norm(arr, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        return arr / norms
+
+
 def get_default_embedding_provider() -> EmbeddingProvider:
     """Returns the configured default embedding provider."""
     settings = get_settings()
-    if settings.gemini_api_key:
-        return GeminiEmbeddingProvider(api_key=settings.gemini_api_key)
-    return SentenceTransformerEmbeddingProvider()
+    provider_name = (settings.embedding_provider or "ollama").lower()
+    if provider_name == "ollama":
+        return OllamaEmbeddingProvider(
+            base_url=settings.ollama_base_url,
+            model_name=settings.ollama_embedding_model,
+            dimension=settings.ollama_embedding_dimension,
+            timeout=settings.ollama_timeout,
+        )
+    elif provider_name == "gemini":
+        return GeminiEmbeddingProvider(api_key=settings.gemini_api_key or "")
+    elif provider_name in ("sentence_transformers", "sentencetransformer", "local"):
+        return SentenceTransformerEmbeddingProvider()
+    raise ValueError(f"Unsupported embedding provider: {provider_name}")

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, AliasChoices
 
 # Resolve the project root (backend/) relative to this file.
 _BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
@@ -41,9 +41,21 @@ class Settings(BaseSettings):
     # ── Database ──────────────────────────────────────────────────────
     database_url: str | None = None
 
-    # ── LLM ───────────────────────────────────────────────────────────
-    gemini_api_key: str | None = Field(default=None, validation_alias="GEMINI_API_KEY")
-    gemini_model_name: str = Field(default="gemini-2.5-flash", validation_alias="GEMINI_MODEL_NAME")
+    # ── Providers & Models ────────────────────────────────────────────
+    llm_provider: str = Field(default="ollama", validation_alias=AliasChoices("IDEAGEN_LLM_PROVIDER", "LLM_PROVIDER"))
+    embedding_provider: str = Field(default="ollama", validation_alias=AliasChoices("IDEAGEN_EMBEDDING_PROVIDER", "EMBEDDING_PROVIDER"))
+
+    # ── Ollama ────────────────────────────────────────────────────────
+    ollama_base_url: str = Field(default="http://localhost:11434", validation_alias=AliasChoices("IDEAGEN_OLLAMA_BASE_URL", "OLLAMA_BASE_URL"))
+    ollama_model: str = Field(default="qwen3:8b", validation_alias=AliasChoices("IDEAGEN_OLLAMA_MODEL", "OLLAMA_MODEL"))
+    ollama_embedding_model: str = Field(default="nomic-embed-text", validation_alias=AliasChoices("IDEAGEN_OLLAMA_EMBEDDING_MODEL", "OLLAMA_EMBEDDING_MODEL"))
+    ollama_embedding_dimension: int = Field(default=768, validation_alias=AliasChoices("IDEAGEN_OLLAMA_EMBEDDING_DIMENSION", "OLLAMA_EMBEDDING_DIMENSION"))
+    ollama_timeout: float = Field(default=120.0, validation_alias=AliasChoices("IDEAGEN_OLLAMA_TIMEOUT", "OLLAMA_TIMEOUT"))
+    ollama_num_ctx: int = Field(default=8192, validation_alias=AliasChoices("IDEAGEN_OLLAMA_NUM_CTX", "OLLAMA_NUM_CTX"))
+
+    # ── Gemini (Preserved) ────────────────────────────────────────────
+    gemini_api_key: str | None = Field(default=None, validation_alias=AliasChoices("IDEAGEN_GEMINI_API_KEY", "GEMINI_API_KEY"))
+    gemini_model_name: str = Field(default="gemini-2.5-flash", validation_alias=AliasChoices("IDEAGEN_GEMINI_MODEL_NAME", "GEMINI_MODEL_NAME"))
 
     # ── Paths ─────────────────────────────────────────────────────────
     project_root: Path = _PROJECT_ROOT

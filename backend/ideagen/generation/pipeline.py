@@ -50,15 +50,16 @@ class ResearchOpportunityPipeline:
         self.llm_provider = llm_provider
         self.max_refinement_iterations = max_refinement_iterations
 
-        self.generation_model = generation_model
-        self.validation_model = validation_model
-        self.embedding_model = getattr(embedder, "model_name", "gemini-embedding-001")
+        resolved_model = getattr(llm_provider, "model_name", "gemini-2.5-flash") if llm_provider else "gemini-2.5-flash"
+        self.generation_model = generation_model or resolved_model
+        self.validation_model = validation_model or resolved_model
+        self.embedding_model = getattr(embedder, "model_name", "nomic-embed-text")
         self.pipeline_version = pipeline_version
 
         # Initialize sub-components
-        self.generator = OpportunityGenerator(llm_provider=llm_provider, model_name=generation_model)
+        self.generator = OpportunityGenerator(llm_provider=llm_provider, model_name=self.generation_model)
         self.retriever = PriorArtRetriever(vector_index=vector_index, embedder=embedder)
-        self.validator = PriorArtValidator(llm_provider=llm_provider, model_name=validation_model)
+        self.validator = PriorArtValidator(llm_provider=llm_provider, model_name=self.validation_model)
         self.refinement_engine = IterativeRefinementEngine(
             retriever=self.retriever,
             validator=self.validator,

@@ -14,9 +14,7 @@ from typing import Dict, List, Optional
 import uuid
 
 from ideagen.core.config import get_settings
-from ideagen.db.persistence import SQLAlchemyPersistenceLayer
-from ideagen.llm.gemini_provider import GeminiLLMProvider
-from ideagen.llm.provider import LLMProvider
+from ideagen.llm import LLMProvider, get_default_llm_provider
 from .models import (
     GapStatus,
     ResearchGapResponseDTO,
@@ -59,11 +57,7 @@ class SemanticGapDiscoveryPipeline:
         self.pattern_analyzer = ResearchPatternAnalyzer(min_supporting_evidence=min_supporting_evidence)
 
         # 4. LLM Validator
-        if llm_provider is not None:
-            val_provider = llm_provider
-        else:
-            api_key = settings.gemini_api_key or ""
-            val_provider = GeminiLLMProvider(api_key=api_key, model_name=settings.gemini_model_name)
+        val_provider = llm_provider if llm_provider is not None else get_default_llm_provider()
         self.validator = GapValidator(provider=val_provider, min_valid_evidence=min_supporting_evidence)
 
     def discover_gaps(self, persist_index: bool = True) -> List[ResearchGapResponseDTO]:

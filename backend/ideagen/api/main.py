@@ -48,7 +48,8 @@ from ideagen.ingestion.pdf import ManualPDFIngestionService, PDFExtractionError
 from ideagen.understanding import PaperUnderstandingPipeline, ResearchKnowledgeResponseDTO
 from ideagen.discovery import SemanticGapDiscoveryPipeline, ResearchGapResponseDTO, GapStatus
 from ideagen.discovery.vector_index import StatementVectorIndex
-from ideagen.discovery.embeddings import GeminiEmbeddingProvider
+from ideagen.discovery.embeddings import get_default_embedding_provider
+from ideagen.llm import get_default_llm_provider
 from ideagen.generation.pipeline import ResearchOpportunityPipeline
 from ideagen.generation.models import ResearchOpportunityInputDTO, OpportunityStatus
 from ideagen.reporting.report_service import OpportunityReportService
@@ -385,29 +386,24 @@ def generate_opportunity_from_gap(gap_id: uuid.UUID, db: Session = Depends(get_d
         existing_methods=methods,
     )
 
-    # Initialize Phase 4 vector index & embedder
-    vector_index = StatementVectorIndex(dimension=3072)
+    # Initialize Phase 4 vector index & embedder using configured provider
+    embedder = get_default_embedding_provider()
+    dimension = embedder.dimension
+    vector_index = StatementVectorIndex(dimension=dimension)
+
     # Populate FAISS index from db statements
     all_stmts = db.query(ResearchStatement).all()
     if all_stmts:
         import numpy as np
-        # Build simple fake or real embeddings for retrieval
-        dummy_vecs = np.random.randn(len(all_stmts), 3072).astype(np.float32)
+        # Build simple initial embeddings for retrieval
+        dummy_vecs = np.random.randn(len(all_stmts), dimension).astype(np.float32)
         vector_index.add_statements(all_stmts, dummy_vecs)
 
-    class FastEmbedder:
-        @property
-        def dimension(self): return 3072
-        @property
-        def model_name(self): return "gemini-embedding-001"
-        def embed_texts(self, texts):
-            import numpy as np
-            return np.random.randn(len(texts), 3072).astype(np.float32)
-
+    llm = get_default_llm_provider()
     pipeline = ResearchOpportunityPipeline(
         vector_index=vector_index,
-        embedder=FastEmbedder(),
-        llm_provider=None, # Handles LLM calls or error propagation as configured
+        embedder=embedder,
+        llm_provider=llm,
         max_refinement_iterations=2,
     )
 
@@ -418,6 +414,8 @@ def generate_opportunity_from_gap(gap_id: uuid.UUID, db: Session = Depends(get_d
         from ideagen.generation.persistence import OpportunityPersistenceLayer
         from ideagen.generation.models import FeasibilityAssessment, NoveltyAssessment, ResearchOpportunityDTO
         p_layer = OpportunityPersistenceLayer(db)
+        model_name = getattr(llm, "model_name", "qwen3:8b")
+        embed_name = getattr(embedder, "model_name", "nomic-embed-text")
         opp_dto = ResearchOpportunityDTO(
             id=uuid.uuid4(),
             gap_id=gap.id,
@@ -446,9 +444,9 @@ def generate_opportunity_from_gap(gap_id: uuid.UUID, db: Session = Depends(get_d
             supporting_paper_ids=paper_ids,
             prior_art_statement_ids=[],
             status=OpportunityStatus.VALIDATED,
-            generation_model="gemini-2.5-flash",
-            validation_model="gemini-2.5-flash",
-            embedding_model="gemini-embedding-001",
+            generation_model=model_name,
+            validation_model=model_name,
+            embedding_model=embed_name,
             refinement_iteration_count=0,
             pipeline_version="v1.0",
         )

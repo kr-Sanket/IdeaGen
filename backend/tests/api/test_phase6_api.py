@@ -28,13 +28,16 @@ from ideagen.api.main import app
 class FakeEmbeddingProvider:
     """Deterministic in-memory embedding provider for offline API testing."""
 
+    def __init__(self, model_name: str = "fake-all-MiniLM-L6-v2"):
+        self._model_name = model_name
+
     @property
     def dimension(self) -> int:
         return 384
 
     @property
     def model_name(self) -> str:
-        return "fake-all-MiniLM-L6-v2"
+        return self._model_name
 
     def embed_texts(self, texts: list[str]) -> np.ndarray:
         if not texts:
@@ -47,7 +50,7 @@ from tests.opportunity.fake_provider import FakeLLMProvider
 
 @pytest.fixture(autouse=True)
 def mock_pipeline_dependencies():
-    """Ensure gap discovery in API endpoints does not download Hugging Face models or require Gemini API keys offline."""
+    """Ensure API endpoints do not make network calls or require live LLM/embedding servers offline."""
     fake_provider = FakeEmbeddingProvider()
     fake_llm = FakeLLMProvider(response={})
     with patch(
@@ -57,7 +60,16 @@ def mock_pipeline_dependencies():
         "ideagen.discovery.embeddings.get_default_embedding_provider",
         return_value=fake_provider,
     ), patch(
-        "ideagen.discovery.pipeline.GeminiLLMProvider",
+        "ideagen.api.main.get_default_embedding_provider",
+        return_value=fake_provider,
+    ), patch(
+        "ideagen.discovery.pipeline.get_default_llm_provider",
+        return_value=fake_llm,
+    ), patch(
+        "ideagen.api.main.get_default_llm_provider",
+        return_value=fake_llm,
+    ), patch(
+        "ideagen.llm.get_default_llm_provider",
         return_value=fake_llm,
     ):
         yield fake_provider
@@ -298,3 +310,14 @@ def test_get_evidence_detail_endpoint(test_db):
     assert evidence["section"] == "Limitations"
     assert evidence["page_start"] == 1
     assert evidence["page_end"] == 2
+
+
+def test_generate_opportunity_endpoint_uses_configured_provider(test_db):
+    client, ids = test_db
+    res = client.post(f"/api/v1/gaps/{ids['gap_id']}/opportunity")
+    assert res.status_code == 200
+    report = res.json()
+    assert report["research_problem"] == "Multi-hop retrieval error propagation"
+    assert report["identified_gap"] == "Unquantified hallucination accumulation in multi-hop RAG"
+    assert "proposed_research_direction" in report
+    assert len(report["supporting_papers"]) == 1

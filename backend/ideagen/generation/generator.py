@@ -40,9 +40,9 @@ class LLMCandidateOpportunitySchema(BaseModel):
 class OpportunityGenerator:
     """Generates grounded candidate research opportunities from validated research gaps."""
 
-    def __init__(self, llm_provider: Optional[LLMProvider] = None, model_name: str = "gemini-2.5-flash"):
+    def __init__(self, llm_provider: Optional[LLMProvider] = None, model_name: Optional[str] = None):
         self.llm_provider = llm_provider
-        self.model_name = model_name
+        self.model_name = model_name or getattr(llm_provider, "model_name", "gemini-2.5-flash")
 
     def generate_candidate(self, input_dto: ResearchOpportunityInputDTO) -> CandidateOpportunity:
         """Generates a candidate research opportunity grounded in the input evidence using LLM."""
