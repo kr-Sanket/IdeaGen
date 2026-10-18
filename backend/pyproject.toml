@@ -23,6 +23,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+ml = [
+    "numpy>=1.26",
+    "faiss-cpu>=1.8",
+    "scikit-learn>=1.5",
+    "sentence-transformers>=3.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",

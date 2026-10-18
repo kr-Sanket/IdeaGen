@@ -35,16 +35,16 @@ from ideagen.understanding.pipeline import PaperUnderstandingPipeline
 
 
 settings = get_settings()
-DB_URL = settings.database_url
-if not DB_URL:
-    raise ValueError("IDEAGEN_DATABASE_URL environment variable is required to run database integration tests.")
 
 
 @pytest.fixture(scope="session")
 def engine():
-    engine = create_engine(DB_URL)
-    Base.metadata.create_all(engine)
-    yield engine
+    db_url = settings.database_url
+    if not db_url:
+        pytest.skip("IDEAGEN_DATABASE_URL is not configured; skipping understanding persistence tests.")
+    eng = create_engine(db_url)
+    Base.metadata.create_all(eng)
+    yield eng
 
 
 @pytest.fixture

@@ -13,6 +13,15 @@ from sqlalchemy import text, inspect
 from sqlalchemy.orm import Session
 from fastapi.testclient import TestClient
 
+from ideagen.core.config import get_settings
+
+settings = get_settings()
+if not settings.database_url:
+    pytest.skip(
+        "IDEAGEN_DATABASE_URL is not configured; skipping PostgreSQL foundation tests.",
+        allow_module_level=True,
+    )
+
 from ideagen.db.session import engine, SessionLocal, get_db
 from ideagen.db.models import Base, Paper
 from ideagen.api.main import app

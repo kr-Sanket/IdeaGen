@@ -1,8 +1,10 @@
 """Tests for Phase 6 API Endpoints, Workspace Stats, and Opportunity Reports."""
 
+from unittest.mock import patch
 import pytest
 import uuid
 import datetime
+import numpy as np
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, Index
 from sqlalchemy.orm import sessionmaker
@@ -21,6 +23,44 @@ from ideagen.db.models import (
 )
 from ideagen.db import get_db
 from ideagen.api.main import app
+
+
+class FakeEmbeddingProvider:
+    """Deterministic in-memory embedding provider for offline API testing."""
+
+    @property
+    def dimension(self) -> int:
+        return 384
+
+    @property
+    def model_name(self) -> str:
+        return "fake-all-MiniLM-L6-v2"
+
+    def embed_texts(self, texts: list[str]) -> np.ndarray:
+        if not texts:
+            return np.empty((0, self.dimension), dtype=np.float32)
+        return np.zeros((len(texts), self.dimension), dtype=np.float32)
+
+
+from tests.opportunity.fake_provider import FakeLLMProvider
+
+
+@pytest.fixture(autouse=True)
+def mock_pipeline_dependencies():
+    """Ensure gap discovery in API endpoints does not download Hugging Face models or require Gemini API keys offline."""
+    fake_provider = FakeEmbeddingProvider()
+    fake_llm = FakeLLMProvider(response={})
+    with patch(
+        "ideagen.discovery.pipeline.get_default_embedding_provider",
+        return_value=fake_provider,
+    ), patch(
+        "ideagen.discovery.embeddings.get_default_embedding_provider",
+        return_value=fake_provider,
+    ), patch(
+        "ideagen.discovery.pipeline.GeminiLLMProvider",
+        return_value=fake_llm,
+    ):
+        yield fake_provider
 
 
 @pytest.fixture

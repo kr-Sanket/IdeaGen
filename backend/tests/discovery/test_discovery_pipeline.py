@@ -28,9 +28,11 @@ DB_URL = settings.database_url
 
 @pytest.fixture(scope="session")
 def engine():
-    engine = create_engine(DB_URL)
-    Base.metadata.create_all(engine)
-    yield engine
+    if not DB_URL:
+        pytest.skip("IDEAGEN_DATABASE_URL is not configured; skipping discovery pipeline tests.")
+    eng = create_engine(DB_URL)
+    Base.metadata.create_all(eng)
+    yield eng
 
 
 @pytest.fixture

@@ -1,10 +1,36 @@
 import os
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 from ideagen.api.main import app
+from ideagen.db.models import Base
+from ideagen.db import get_db
 import io
 import pytest
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def isolated_upload_db():
+    """Ensure upload tests run against an isolated in-memory SQLite database."""
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    SessionMaker = sessionmaker(bind=engine)
+    session = SessionMaker()
+
+    def override_get_db():
+        yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    yield session
+    app.dependency_overrides.pop(get_db, None)
+    session.close()
 
 def create_mock_pdf_content(valid=True):
     # Just creating some dummy PDF-like bytes or empty bytes for invalid

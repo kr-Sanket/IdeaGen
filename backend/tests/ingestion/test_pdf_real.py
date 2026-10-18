@@ -27,6 +27,15 @@ from ideagen.ingestion.pdf import (
 )
 from ideagen.ingestion.text_cleaner import TextCleaner
 from ideagen.ingestion.section_detector import SectionDetector
+from ideagen.core.config import get_settings
+
+settings = get_settings()
+if not settings.database_url:
+    pytest.skip(
+        "IDEAGEN_DATABASE_URL is not configured; skipping real PDF database integration tests.",
+        allow_module_level=True,
+    )
+
 from ideagen.db.persistence import SQLAlchemyPersistenceLayer
 from ideagen.db.models import Paper, PaperDocument, PaperPassage
 from ideagen.db.session import engine, SessionLocal
@@ -38,7 +47,8 @@ def db_session():
     """Provides a transactional database session for tests with rollback."""
     connection = engine.connect()
     transaction = connection.begin()
-    session = SessionLocal(bind=connection)
+    from sqlalchemy.orm import Session as SASession
+    session = SASession(bind=connection, join_transaction_mode="create_savepoint")
     try:
         yield session
     finally:

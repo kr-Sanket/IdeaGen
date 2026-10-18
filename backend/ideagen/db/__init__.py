@@ -17,7 +17,7 @@ from .models import (
     OpportunityRefinementRecord,
 )
 from .persistence import SQLAlchemyPersistenceLayer
-from .session import engine, SessionLocal, get_db
+from .session import get_db, get_engine, get_session_factory
 
 __all__ = [
     "Base",
@@ -38,5 +38,15 @@ __all__ = [
     "engine",
     "SessionLocal",
     "get_db",
+    "get_engine",
+    "get_session_factory",
 ]
+
+
+def __getattr__(name: str):
+    """Provide lazy access to engine and SessionLocal from session module."""
+    if name in ("engine", "SessionLocal"):
+        from . import session
+        return getattr(session, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
