@@ -39,7 +39,10 @@ class RawStatementExtraction(BaseModel):
 
     statement_text: str = Field(description="The scientific claim, statement, or finding extracted from the text.")
     statement_type: StatementType = Field(description="The category of the scientific statement.")
-    passage_index: Optional[int] = Field(default=None, description="Index of the input passage providing supporting evidence.")
+    passage_index: Optional[int] = Field(
+        default=None,
+        description="0-based integer index of the input passage (matching the [PASSAGE X] headers) providing supporting evidence. Required for all grounded statements (use null if ungrounded).",
+    )
     confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Confidence score if provided by the model.")
 
 

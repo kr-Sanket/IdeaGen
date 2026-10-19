@@ -7,6 +7,7 @@ enforcing strict Pydantic validation, error handling, and passage-level provenan
 from __future__ import annotations
 
 import logging
+import re
 from typing import Dict, List, Optional
 import uuid
 
@@ -21,6 +22,11 @@ from .models import (
 from .passage_selector import SelectedPassage, PassageSelector
 
 logger = logging.getLogger(__name__)
+
+INLINE_PASSAGE_REF_PATTERN = re.compile(
+    r"\s*[\(\[]\s*passage(?:_index)?:\s*(\d+)\s*[\)\]]\s*(\.?)\s*$",
+    re.IGNORECASE,
+)
 
 
 SYSTEM_PROMPT = """You are an expert scientific paper analyzer.
@@ -112,27 +118,65 @@ class ScientificPaperExtractor:
         # Resolve provenance for each research statement
         resolved_statements: List[ResearchStatementCreateDTO] = []
         for raw_stmt in raw_output.statements:
+            statement_text = raw_stmt.statement_text.strip()
+            effective_passage_index = raw_stmt.passage_index
+            recovered_from_inline = False
+
+            # Defensive fallback: detect trailing inline reference (e.g. "(passage_index: 14)")
+            match = INLINE_PASSAGE_REF_PATTERN.search(statement_text)
+            if match:
+                inline_idx = int(match.group(1))
+                trailing_period = match.group(2)
+                prefix = statement_text[:match.start()].rstrip()
+                if trailing_period and not prefix.endswith("."):
+                    statement_text = prefix + trailing_period
+                else:
+                    statement_text = prefix
+
+                if effective_passage_index is None:
+                    effective_passage_index = inline_idx
+                    recovered_from_inline = True
+
             source_p: Optional[SelectedPassage] = None
-            if raw_stmt.passage_index is not None and raw_stmt.passage_index in passage_map:
-                source_p = passage_map[raw_stmt.passage_index]
+
+            # Resolve index against the actual selected-passage map
+            if effective_passage_index is not None:
+                if effective_passage_index in passage_map:
+                    source_p = passage_map[effective_passage_index]
+                else:
+                    logger.warning(
+                        f"Statement passage_index {effective_passage_index} not found in selected passages "
+                        f"(valid indexes: {sorted(passage_map.keys())}) for paper {paper_id}. "
+                        "Leaving provenance unlinked to prevent false attribution."
+                    )
             else:
-                # Text match fallback if index wasn't populated
+                # Text match fallback if index wasn't populated or detected inline
                 for p in selected_passages:
-                    if raw_stmt.statement_text in p.text:
+                    if statement_text and statement_text in p.text:
                         source_p = p
                         break
 
+            if source_p is None:
+                logger.warning(
+                    f"Provenance could not be resolved for statement: '{statement_text[:80]}...' "
+                    f"(paper_id={paper_id}). Preserving statement with unlinked provenance."
+                )
+
+            metadata_dict = {
+                "model_reported_passage_index": raw_stmt.passage_index,
+            }
+            if recovered_from_inline:
+                metadata_dict["recovered_inline_passage_index"] = effective_passage_index
+
             statement_dto = ResearchStatementCreateDTO(
-                statement_text=raw_stmt.statement_text,
+                statement_text=statement_text,
                 statement_type=raw_stmt.statement_type,
                 source_passage_id=source_p.passage_id if source_p else None,
                 source_page_start=source_p.page_start if source_p else None,
                 source_page_end=source_p.page_end if source_p else None,
                 section=source_p.section if source_p else None,
                 confidence=raw_stmt.confidence,
-                metadata={
-                    "model_reported_passage_index": raw_stmt.passage_index,
-                },
+                metadata=metadata_dict,
             )
             resolved_statements.append(statement_dto)
 
