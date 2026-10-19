@@ -523,3 +523,107 @@ def test_existing_endpoint_contracts_and_gap_status_checks(test_db):
     for key in required_keys:
         assert key in data, f"Missing required contract key: {key}"
     assert data["status"] == "VALIDATED"
+
+
+def test_discover_gaps_endpoint_accepts_cutoff_date(test_db):
+    """Regression test for Priority 5: discover endpoint accepts cutoff_date query param
+    and passes it to SemanticGapDiscoveryPipeline."""
+    client, ids = test_db
+    with patch("ideagen.api.main.SemanticGapDiscoveryPipeline.discover_gaps", return_value=[]) as mock_discover:
+        res = client.post("/api/gaps/discover?cutoff_date=2024-06-01")
+        assert res.status_code == 200
+        mock_discover.assert_called_once_with(cutoff_date="2024-06-01")
+
+
+def test_generate_opportunity_endpoint_respects_cutoff_date(test_db, mock_pipeline_dependencies):
+    """Regression test for Priority 5: opportunity endpoint restricts prior-art FAISS index
+    to statements strictly eligible at cutoff_date, excluding future papers."""
+    client, ids = test_db
+    SessionMaker = ids["session_maker"]
+
+    future_paper_id = uuid.uuid4()
+    future_stmt_id = uuid.uuid4()
+
+    with SessionMaker() as db:
+        # Paper from 2026 (future relative to cutoff 2025-06-01)
+        future_paper = Paper(
+            id=future_paper_id,
+            source_type="MANUAL_UPLOAD",
+            source_id="future_paper_1",
+            title="Future Advances in LLM Reasoning (2026)",
+            publication_date=datetime.date(2026, 1, 1),
+            batch_id="batch_future",
+            abstract="Future methods solving multi-hop reasoning completely.",
+            authors=["Future Author"],
+            referenced_works=[],
+            raw_metadata={},
+        )
+        db.add(future_paper)
+
+        future_doc = PaperDocument(
+            id=uuid.uuid4(),
+            paper_id=future_paper_id,
+            full_text="Future paper full text.",
+            extraction_method="PyMuPDF",
+            extraction_version="v1.0",
+            extracted_at=datetime.datetime.utcnow(),
+        )
+        db.add(future_doc)
+
+        future_knowledge = ResearchKnowledge(
+            id=uuid.uuid4(),
+            paper_id=future_paper_id,
+            research_problem="Future Multi-hop",
+            methodology="Future Method",
+            model_name="future-model",
+            extracted_at=datetime.datetime.utcnow(),
+        )
+        db.add(future_knowledge)
+
+        future_stmt = ResearchStatement(
+            id=future_stmt_id,
+            knowledge_id=future_knowledge.id,
+            paper_id=future_paper_id,
+            statement_text="Future breakthrough eliminates multi-hop hallucinations completely.",
+            statement_type="FINDING",
+            confidence=0.99,
+        )
+        db.add(future_stmt)
+        db.commit()
+
+    captured_indexes = []
+    original_init = ResearchOpportunityPipeline.__init__
+
+    def spy_init(self, *args, **kwargs):
+        captured_indexes.append(kwargs.get("vector_index"))
+        return original_init(self, *args, **kwargs)
+
+    with patch.object(ResearchOpportunityPipeline, "__init__", side_effect=spy_init, autospec=True):
+        # 1. When cutoff_date="2025-06-01" is passed, future paper statement must NOT be in vector index
+        res = client.post(f"/api/v1/gaps/{ids['gap_id']}/opportunity?cutoff_date=2025-06-01")
+        assert res.status_code == 200
+
+        assert len(captured_indexes) == 1
+        v_idx = captured_indexes[0]
+        assert v_idx is not None
+        # Historical statement (paper_id published 2025-01-01) should be indexed
+        assert ids["stmt_id"] in v_idx.id_list
+        # Future statement (paper_id published 2026-01-01) must NOT be indexed
+        assert future_stmt_id not in v_idx.id_list
+
+    # 2. When gap has metadata_json temporal_cutoff and no query param passed, it should also isolate
+    captured_indexes.clear()
+    with SessionMaker() as db:
+        gap = db.query(ResearchGap).filter(ResearchGap.id == ids["gap_id"]).first()
+        gap.metadata_json = {"temporal_cutoff": "2025-06-01"}
+        db.commit()
+
+    with patch.object(ResearchOpportunityPipeline, "__init__", side_effect=spy_init, autospec=True):
+        res = client.post(f"/api/v1/gaps/{ids['gap_id']}/opportunity")
+        assert res.status_code == 200
+
+        assert len(captured_indexes) == 1
+        v_idx = captured_indexes[0]
+        assert ids["stmt_id"] in v_idx.id_list
+        assert future_stmt_id not in v_idx.id_list
+

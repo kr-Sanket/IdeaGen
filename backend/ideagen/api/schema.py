@@ -184,11 +184,11 @@ class SearchResultPaper(BaseModel):
     source: str
     title: str
     authors: List[str]
-    publication_year: int
-    publication_date: str
+    publication_year: Optional[int] = None
+    publication_date: Optional[str] = None
     abstract: str
-    url: Optional[str]
-    doi: Optional[str]
+    url: Optional[str] = None
+    doi: Optional[str] = None
     raw_metadata: Dict[str, Any]
 
 class SearchResponse(BaseModel):

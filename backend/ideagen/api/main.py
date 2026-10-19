@@ -302,12 +302,15 @@ def search_statements(
 # ── Research Gaps Endpoints ──────────────────────────────────────────────
 
 @app.post("/api/gaps/discover", response_model=List[ResearchGapResponseDTO])
-def discover_research_gaps(db: Session = Depends(get_db)):
+def discover_research_gaps(
+    cutoff_date: Optional[str] = Query(None, description="Optional ISO publication cutoff date YYYY-MM-DD"),
+    db: Session = Depends(get_db)
+):
     """Triggers end-to-end semantic gap discovery across all research statements."""
     persistence = SQLAlchemyPersistenceLayer(db)
     pipeline = SemanticGapDiscoveryPipeline(persistence=persistence)
     try:
-        return pipeline.discover_gaps()
+        return pipeline.discover_gaps(cutoff_date=cutoff_date)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Discovery pipeline failed: {str(e)}")
 
@@ -355,7 +358,11 @@ def get_research_gap(gap_id: uuid.UUID, db: Session = Depends(get_db)):
 
 @app.post("/api/v1/gaps/{gap_id}/opportunity", response_model=OpportunityReportDTO)
 @app.post("/api/v1/gaps/{gap_id}/generate_opportunity", response_model=OpportunityReportDTO)
-def generate_opportunity_from_gap(gap_id: uuid.UUID, db: Session = Depends(get_db)):
+def generate_opportunity_from_gap(
+    gap_id: uuid.UUID,
+    cutoff_date: Optional[str] = Query(None, description="Optional ISO cutoff date YYYY-MM-DD to restrict prior-art retrieval"),
+    db: Session = Depends(get_db)
+):
     """Synthesizes and persists a research opportunity from a validated research gap."""
     persistence = SQLAlchemyPersistenceLayer(db)
     gap = persistence.get_research_gap(gap_id)
@@ -391,8 +398,19 @@ def generate_opportunity_from_gap(gap_id: uuid.UUID, db: Session = Depends(get_d
     dimension = embedder.dimension
     vector_index = StatementVectorIndex(dimension=dimension)
 
+    # Resolve effective cutoff (from query param or gap metadata)
+    effective_cutoff = cutoff_date
+    if not effective_cutoff and gap.metadata_json and isinstance(gap.metadata_json, dict):
+        effective_cutoff = gap.metadata_json.get("temporal_cutoff")
+
     # Populate FAISS index from db statements using genuine embeddings
-    all_stmts = db.query(ResearchStatement).all()
+    if effective_cutoff:
+        from ideagen.discovery.temporal import filter_statements_by_cutoff
+        all_stmts = persistence.get_all_research_statements(cutoff_date=effective_cutoff)
+        all_stmts = filter_statements_by_cutoff(all_stmts, effective_cutoff)
+    else:
+        all_stmts = db.query(ResearchStatement).all()
+
     if all_stmts:
         stmt_texts_to_embed = [s.statement_text for s in all_stmts]
         stmt_vectors = embedder.embed_texts(stmt_texts_to_embed)
@@ -554,18 +572,18 @@ async def upload_papers(files: List[UploadFile] = File(...), db: Session = Depen
                         source="UPLOAD",
                         title=p.title or file.filename,
                         authors=p.authors or [],
-                        publication_year=p.publication_date.year if p.publication_date else datetime.date.today().year,
-                        publication_date=p.publication_date.isoformat() if p.publication_date else datetime.date.today().isoformat(),
+                        publication_year=p.publication_date.year if p.publication_date else None,
+                        publication_date=p.publication_date.isoformat() if p.publication_date else None,
                         abstract=p.abstract,
                         url=None,
                         doi=p.doi,
-                        raw_metadata=raw_meta
+                        raw_metadata={"content_hash": content_hash} if not raw_meta else raw_meta
                     ))
                     continue
 
             abstract = extracted_text[:1000]
             unique_source_id = f"upload_{uuid.uuid4().hex}"
-            pub_date = datetime.date.today()
+            pub_date = None
             now_ts = datetime.datetime.now(datetime.timezone.utc)
 
             paper_dto = PaperCreateDTO(
@@ -609,8 +627,8 @@ async def upload_papers(files: List[UploadFile] = File(...), db: Session = Depen
                 source="UPLOAD",
                 title=file.filename,
                 authors=[],
-                publication_year=pub_date.year,
-                publication_date=pub_date.isoformat(),
+                publication_year=pub_date.year if pub_date else None,
+                publication_date=pub_date.isoformat() if pub_date else None,
                 abstract=abstract,
                 url=None,
                 doi=None,
