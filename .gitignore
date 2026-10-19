@@ -99,3 +99,9 @@ test_pdf.pdf
 *.sqlite
 *.sqlite3
 *.db
+
+# ========================
+# Experiment evaluation data & artifacts
+# ========================
+experiments/data/**/*.pdf
+experiments/artifacts/
