@@ -169,3 +169,15 @@ def test_invalid_paper_id_rejected(session):
     with pytest.raises(ValueError, match="IntegrityError"):
         layer.save_paper_document(doc_dto)
 
+
+def test_persistence_type_hints_resolvable():
+    """Regression test ensuring get_type_hints() resolves cleanly on Python 3.11-3.14."""
+    import typing
+    hints_passages = typing.get_type_hints(SQLAlchemyPersistenceLayer.get_all_passages)
+    assert "cutoff_date" in hints_passages
+    assert "return" in hints_passages
+
+    hints_statements = typing.get_type_hints(SQLAlchemyPersistenceLayer.get_all_research_statements)
+    assert "cutoff_date" in hints_statements
+    assert "return" in hints_statements
+

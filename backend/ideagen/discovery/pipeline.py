@@ -60,16 +60,57 @@ class SemanticGapDiscoveryPipeline:
         val_provider = llm_provider if llm_provider is not None else get_default_llm_provider()
         self.validator = GapValidator(provider=val_provider, min_valid_evidence=min_supporting_evidence)
 
-    def discover_gaps(self, persist_index: bool = True) -> List[ResearchGapResponseDTO]:
-        """Executes the full semantic gap discovery pipeline across all research statements."""
-        # 1. Load statements from database
-        statements = self.persistence.get_all_research_statements()
+    def discover_gaps(
+        self,
+        persist_index: bool = True,
+        cutoff_date: Optional[Union[datetime.date, datetime.datetime, str]] = None,
+    ) -> List[ResearchGapResponseDTO]:
+        """Executes the full semantic gap discovery pipeline across eligible research statements."""
+        from .temporal import normalize_cutoff_date, filter_statements_by_cutoff
+
+        norm_cutoff = normalize_cutoff_date(cutoff_date)
+        if norm_cutoff is not None:
+            logger.info(f"Executing semantic gap discovery with temporal cutoff: {norm_cutoff.isoformat()}")
+
+        # 1. Load statements from database (enforcing cutoff if provided)
+        try:
+            statements = self.persistence.get_all_research_statements(cutoff_date=norm_cutoff)
+        except TypeError:
+            statements = self.persistence.get_all_research_statements()
+
+        # In-memory defense-in-depth filtering
+        if norm_cutoff is not None:
+            statements = filter_statements_by_cutoff(statements, norm_cutoff)
+
         if not statements:
-            logger.info("No research statements found in database. Discovery skipped.")
+            logger.info("No eligible research statements found in database for discovery. Skipped.")
             return []
 
         statements_by_id = {s.id: s for s in statements}
         texts = [s.statement_text for s in statements]
+        eligible_paper_ids = {s.paper_id for s in statements}
+
+        # Load supporting passages for evidence grounding (strictly bounded to eligible papers)
+        passages_by_id = {}
+        if hasattr(self.persistence, "get_all_passages"):
+            try:
+                passages = self.persistence.get_all_passages(cutoff_date=norm_cutoff)
+            except TypeError:
+                passages = self.persistence.get_all_passages()
+            except Exception as e:
+                logger.warning(f"Could not load passages from persistence: {e}")
+                passages = []
+
+            for p in passages:
+                p_paper_id = getattr(p, "paper_id", None) if hasattr(p, "paper_id") else (
+                    p.get("paper_id") if isinstance(p, dict) else None
+                )
+                if norm_cutoff is None or p_paper_id in eligible_paper_ids:
+                    p_id = getattr(p, "id", None) if hasattr(p, "id") else (
+                        p.get("id") if isinstance(p, dict) else None
+                    )
+                    if p_id:
+                        passages_by_id[p_id] = p
 
         # 2. Generate dense scientific embeddings
         logger.info(f"Generating embeddings for {len(statements)} statements with {self.embedding_provider.model_name}")
@@ -77,8 +118,10 @@ class SemanticGapDiscoveryPipeline:
 
         # 3. Update / Rebuild FAISS local index
         self.vector_index.rebuild(statements=statements, vectors=vectors)
-        if persist_index:
+        if persist_index and norm_cutoff is None:
             self.vector_index.save(index_file=self.index_file, meta_file=self.meta_file)
+        elif persist_index and norm_cutoff is not None:
+            logger.info("Skipping FAISS index persistence to shared directory for temporal cutoff run.")
 
         # 4. Construct semantic landscape via grouping
         clusters = self.grouper.group_statements(statements=statements, vectors=vectors)
@@ -96,7 +139,12 @@ class SemanticGapDiscoveryPipeline:
             gap_dto = self.validator.validate_candidate(
                 candidate=candidate,
                 statements_by_id=statements_by_id,
+                passages_by_id=passages_by_id,
             )
+
+            # Record temporal cutoff in gap metadata if present
+            if norm_cutoff is not None:
+                gap_dto.metadata["temporal_cutoff"] = norm_cutoff.isoformat()
 
             # 7. Persist to PostgreSQL
             gap_id = self.persistence.save_research_gap(gap_dto)

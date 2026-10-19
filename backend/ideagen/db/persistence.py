@@ -1,11 +1,24 @@
+from __future__ import annotations
+
+import datetime
+from typing import List, Optional, Union
 import uuid
-from typing import Optional
+
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+
 from ideagen.ingestion.models import PaperCreateDTO, SourceType
 from ideagen.ingestion.pipeline import PersistenceLayer
-from .models import Paper
+from .models import (
+    Paper,
+    PaperDocument,
+    PaperPassage,
+    ResearchKnowledge,
+    ResearchStatement,
+    ResearchGap,
+    GapEvidence,
+)
 
 class SQLAlchemyPersistenceLayer:
     def __init__(self, session: Session):
@@ -120,6 +133,21 @@ class SQLAlchemyPersistenceLayer:
         stmt = select(PaperPassage).where(PaperPassage.paper_id == paper_id).order_by(PaperPassage.passage_index)
         return list(self.session.scalars(stmt).all())
 
+    def get_all_passages(
+        self,
+        cutoff_date: Optional[Union[datetime.date, datetime.datetime, str]] = None,
+    ) -> list['PaperPassage']:
+        from .models import PaperPassage, Paper
+        stmt = select(PaperPassage).order_by(PaperPassage.created_at)
+        if cutoff_date is not None:
+            from ideagen.discovery.temporal import normalize_cutoff_date
+            norm_cutoff = normalize_cutoff_date(cutoff_date)
+            stmt = stmt.join(PaperPassage.paper).where(
+                Paper.publication_date.is_not(None),
+                Paper.publication_date <= norm_cutoff,
+            )
+        return list(self.session.scalars(stmt).unique().all())
+
     def save_research_knowledge(self, dto: 'ideagen.understanding.models.ResearchKnowledgeCreateDTO') -> uuid.UUID:
         from .models import ResearchKnowledge, ResearchStatement
         # Check if record already exists for this paper
@@ -190,10 +218,26 @@ class SQLAlchemyPersistenceLayer:
         stmt = select(ResearchStatement).where(ResearchStatement.paper_id == paper_id).order_by(ResearchStatement.created_at)
         return list(self.session.scalars(stmt).all())
 
-    def get_all_research_statements(self) -> list['ResearchStatement']:
-        from .models import ResearchStatement
-        stmt = select(ResearchStatement).order_by(ResearchStatement.created_at)
-        return list(self.session.scalars(stmt).all())
+    def get_all_research_statements(
+        self,
+        cutoff_date: Optional[Union[datetime.date, datetime.datetime, str]] = None,
+    ) -> list['ResearchStatement']:
+        from .models import ResearchStatement, Paper
+        from sqlalchemy.orm import joinedload
+        stmt = select(ResearchStatement).options(
+            joinedload(ResearchStatement.passage),
+            joinedload(ResearchStatement.paper),
+        ).order_by(ResearchStatement.created_at)
+
+        if cutoff_date is not None:
+            from ideagen.discovery.temporal import normalize_cutoff_date
+            norm_cutoff = normalize_cutoff_date(cutoff_date)
+            stmt = stmt.join(ResearchStatement.paper).where(
+                Paper.publication_date.is_not(None),
+                Paper.publication_date <= norm_cutoff,
+            )
+
+        return list(self.session.scalars(stmt).unique().all())
 
     def save_research_gap(self, dto: 'ideagen.discovery.models.ResearchGapCreateDTO') -> uuid.UUID:
         from .models import ResearchGap, GapEvidence

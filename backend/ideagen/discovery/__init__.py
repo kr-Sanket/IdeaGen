@@ -22,6 +22,7 @@ from .grouper import SemanticGrouper, SemanticCluster
 from .pattern_analyzer import ResearchPatternAnalyzer
 from .validator import GapValidator
 from .pipeline import SemanticGapDiscoveryPipeline
+from .temporal import normalize_cutoff_date, is_paper_eligible, filter_statements_by_cutoff
 
 __all__ = [
     "GapStatus",
@@ -44,4 +45,7 @@ __all__ = [
     "ResearchPatternAnalyzer",
     "GapValidator",
     "SemanticGapDiscoveryPipeline",
+    "normalize_cutoff_date",
+    "is_paper_eligible",
+    "filter_statements_by_cutoff",
 ]
