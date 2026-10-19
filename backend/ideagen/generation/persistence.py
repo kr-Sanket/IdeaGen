@@ -39,6 +39,7 @@ class OpportunityPersistenceLayer:
         dto: ResearchOpportunityDTO,
         assessments: Optional[List[Tuple[int, PriorArtAssessment]]] = None,
         iterations: Optional[List[Tuple[int, str, str, str, str]]] = None,
+        bridge: bool = True,
     ) -> ResearchOpportunityRecord:
         """Persists a ResearchOpportunityDTO and associated prior-art assessments & refinement records."""
 
@@ -101,6 +102,15 @@ class OpportunityPersistenceLayer:
                     status=iter_status,
                 )
                 self.session.add(iter_rec)
+
+        # Bridge to Opportunity lifecycle entity if eligible
+        if bridge:
+            try:
+                from ideagen.opportunity.bridge import OpportunityBridgeService
+                bridge_svc = OpportunityBridgeService(self.session)
+                bridge_svc.bridge_opportunity(record)
+            except Exception as e:
+                logger.warning(f"Failed to bridge ResearchOpportunityRecord {record.id}: {e}")
 
         self.session.commit()
         self.session.refresh(record)

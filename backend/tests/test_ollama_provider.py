@@ -82,6 +82,7 @@ def test_ollama_generate_structured_success(mock_post):
     call_kwargs = mock_post.call_args[1]
     assert call_kwargs["json"]["model"] == "qwen3:8b"
     assert call_kwargs["json"]["stream"] is False
+    assert call_kwargs["json"]["think"] is False
     assert call_kwargs["json"]["options"]["temperature"] == 0.0
     assert call_kwargs["json"]["options"]["num_ctx"] == 8192
 

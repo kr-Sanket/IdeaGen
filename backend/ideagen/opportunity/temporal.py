@@ -37,6 +37,7 @@ class OpportunityEvolutionResult:
     events: List[EvolutionEvent]
     processed_paper_count: int
     skipped_paper_count: int
+    grounding_rejections_count: int = 0
 
 class OpportunityEvolutionService:
     def __init__(self, integration_service: OpportunityClassificationIntegration):
@@ -47,7 +48,8 @@ class OpportunityEvolutionService:
         db: Session,
         opportunity_id: uuid.UUID,
         batch: TemporalBatch,
-        papers: List[Paper]
+        papers: List[Paper],
+        chunk_size: Optional[int] = None,
     ) -> OpportunityEvolutionResult:
         if batch.start_date > batch.end_date:
             raise ValueError(f"Invalid date range for batch {batch.batch_id}")
@@ -73,34 +75,78 @@ class OpportunityEvolutionService:
         # Deterministic chronological order
         eligible_papers.sort(key=lambda p: (p.publication_date, str(p.id)))
         
-        for p in eligible_papers:
-            try:
-                res = self.integration.classify_and_apply(
-                    opportunity_id=opportunity_id,
-                    paper_id=p.id
+        from sqlalchemy import select
+        from ideagen.db.models import OpportunityEvidence
+        from ideagen.opportunity.grounding import UngroundedEvidenceError
+        import logging
+        logger = logging.getLogger(__name__)
+
+        processed_count = 0
+        grounding_rejections = 0
+
+        chunks: List[List[Paper]] = (
+            [eligible_papers[i:i + chunk_size] for i in range(0, len(eligible_papers), chunk_size)]
+            if chunk_size and chunk_size > 0
+            else [eligible_papers]
+        )
+
+        for chunk_idx, chunk in enumerate(chunks):
+            if len(chunks) > 1:
+                logger.info(
+                    f"Processing batch {batch.batch_id} chunk {chunk_idx + 1}/{len(chunks)} "
+                    f"({len(chunk)} papers) for opportunity {opportunity_id}"
                 )
-            except Exception as e:
-                # Existing AD-22 deduplication might raise ValueError depending on how transition service handles it,
-                # but typically if transition fails, we either skip or propagate.
-                # Let's propagate it unless it's a known skip. The requirements say respect idempotency conflict.
-                # If OpportunityTransitionService raises ValueError on duplicate evidence, we skip or bubble up.
-                # We will just let it bubble up, tests will verify atomicity/failure behavior.
-                raise e
+            for p in chunk:
+                # Duplicate-safe replay: skip already recorded (opportunity, paper) pairs deterministically
+                existing_evidence = db.execute(
+                    select(OpportunityEvidence).where(
+                        OpportunityEvidence.opportunity_id == opportunity_id,
+                        OpportunityEvidence.paper_id == p.id
+                    )
+                ).scalar_one_or_none()
 
-            directional_ext = (res.relationship == OpportunityRelationship.EXTENDS)
+                if existing_evidence is not None:
+                    skipped += 1
+                    logger.info(
+                        f"Skipping paper {p.id}: evidence already recorded for opportunity {opportunity_id}."
+                    )
+                    continue
 
-            events.append(EvolutionEvent(
-                batch_id=batch.batch_id,
-                paper_id=res.paper_id,
-                publication_date=p.publication_date,
-                relationship=res.relationship,
-                previous_status=res.previous_status,
-                new_status=res.new_status,
-                state_changed=res.state_changed,
-                evidence_id=res.evidence_id,
-                history_id=res.history_id,
-                directional_extension_detected=directional_ext
-            ))
+                savepoint = db.begin_nested()
+                try:
+                    res = self.integration.classify_and_apply(
+                        opportunity_id=opportunity_id,
+                        paper_id=p.id
+                    )
+                    savepoint.commit()
+                    processed_count += 1
+                except UngroundedEvidenceError as ev_err:
+                    savepoint.rollback()
+                    skipped += 1
+                    grounding_rejections += 1
+                    logger.warning(
+                        f"Rejecting ungrounded evidence for paper {p.id} against opportunity {opportunity_id}: {ev_err}. "
+                        f"Status transition discarded."
+                    )
+                    continue
+                except Exception as e:
+                    savepoint.rollback()
+                    raise e
+
+                directional_ext = (res.relationship == OpportunityRelationship.EXTENDS)
+
+                events.append(EvolutionEvent(
+                    batch_id=batch.batch_id,
+                    paper_id=res.paper_id,
+                    publication_date=p.publication_date,
+                    relationship=res.relationship,
+                    previous_status=res.previous_status,
+                    new_status=res.new_status,
+                    state_changed=res.state_changed,
+                    evidence_id=res.evidence_id,
+                    history_id=res.history_id,
+                    directional_extension_detected=directional_ext
+                ))
 
         # Refetch opp to get final status
         opp_final = db.query(Opportunity).filter(Opportunity.id == opportunity_id).first()
@@ -111,8 +157,9 @@ class OpportunityEvolutionService:
             initial_status=initial_status,
             final_status=final_status,
             events=events,
-            processed_paper_count=len(eligible_papers),
-            skipped_paper_count=skipped
+            processed_paper_count=processed_count,
+            skipped_paper_count=skipped,
+            grounding_rejections_count=grounding_rejections,
         )
 
     def replay(

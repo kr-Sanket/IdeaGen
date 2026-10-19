@@ -47,6 +47,9 @@ from ideagen.db.models import (
     ResearchOpportunityRecord,
     PriorArtAssessmentRecord,
     OpportunityRefinementRecord,
+    Opportunity,
+    OpportunityEvidence,
+    OpportunityHistory,
 )
 from ideagen.db.persistence import SQLAlchemyPersistenceLayer
 from ideagen.ingestion.pdf import ManualPDFIngestionService, PDFExtractionError
@@ -62,6 +65,18 @@ from ideagen.llm import get_default_llm_provider
 from ideagen.generation.pipeline import ResearchOpportunityPipeline
 from ideagen.generation.models import ResearchOpportunityInputDTO
 from ideagen.reporting.report_service import OpportunityReportService
+from ideagen.opportunity.models import OpportunityRelationship, OpportunityStatus
+from ideagen.opportunity.classifier import RelationshipClassifier
+from ideagen.opportunity.service import OpportunityTransitionService
+from ideagen.opportunity.integration import OpportunityClassificationIntegration
+from ideagen.opportunity.temporal import (
+    TemporalBatch,
+    OpportunityEvolutionService,
+    OpportunityEvolutionResult,
+)
+from ideagen.opportunity.bridge import OpportunityBridgeService
+from ideagen.db.session import configure_sqlite_foreign_keys
+from ideagen.ingestion.preflight import run_corpus_preflight, CorpusPreflightReport
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +103,11 @@ def compute_configuration_fingerprint(
     ollama_timeout: float = 300.0,
     max_refinement_iterations: int = 2,
     temporal_cutoff: Optional[str] = None,
+    enable_stage_5: bool = False,
+    stage_5_batch_window_days: Optional[int] = None,
+    stage_5_cutoffs: Optional[List[str]] = None,
+    stage_5_chunk_size: Optional[int] = None,
+    stage_5_max_retries: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Generates a canonical configuration dictionary of all material run settings."""
     return {
@@ -108,6 +128,11 @@ def compute_configuration_fingerprint(
         },
         "max_refinement_iterations": int(max_refinement_iterations),
         "temporal_cutoff": str(temporal_cutoff) if temporal_cutoff else None,
+        "enable_stage_5": bool(enable_stage_5),
+        "stage_5_batch_window_days": stage_5_batch_window_days,
+        "stage_5_cutoffs": [str(c) for c in stage_5_cutoffs] if stage_5_cutoffs else None,
+        "stage_5_chunk_size": stage_5_chunk_size,
+        "stage_5_max_retries": stage_5_max_retries,
     }
 
 
@@ -183,7 +208,140 @@ def compare_fingerprints(stored: Dict[str, Any], current: Dict[str, Any]) -> Lis
             f"Temporal cutoff mismatch: stored={stored.get('temporal_cutoff')!r}, current={current.get('temporal_cutoff')!r}"
         )
 
+    # 9. Stage 5 settings
+    stored_s5 = stored.get("enable_stage_5", False)
+    current_s5 = current.get("enable_stage_5", False)
+    if stored_s5 != current_s5:
+        mismatches.append(
+            f"Stage 5 enabled mismatch: stored={stored_s5}, current={current_s5}"
+        )
+    if current_s5 and stored_s5:
+        if stored.get("stage_5_batch_window_days") != current.get("stage_5_batch_window_days"):
+            mismatches.append(
+                f"Stage 5 batch window mismatch: stored={stored.get('stage_5_batch_window_days')}, current={current.get('stage_5_batch_window_days')}"
+            )
+        if stored.get("stage_5_cutoffs") != current.get("stage_5_cutoffs"):
+            mismatches.append(
+                f"Stage 5 cutoffs mismatch: stored={stored.get('stage_5_cutoffs')}, current={current.get('stage_5_cutoffs')}"
+            )
+        if stored.get("stage_5_chunk_size") != current.get("stage_5_chunk_size"):
+            mismatches.append(
+                f"Stage 5 chunk size mismatch: stored={stored.get('stage_5_chunk_size')}, current={current.get('stage_5_chunk_size')}"
+            )
+
     return mismatches
+
+
+def is_opportunity_available_at_cutoff(
+    opp: Opportunity,
+    cutoff_date: datetime.date,
+) -> bool:
+    """Returns True if the opportunity was created/available on or before the cutoff date."""
+    opp_dt = opp.created_at
+    if opp_dt is None and getattr(opp, "research_opportunity", None):
+        opp_dt = opp.research_opportunity.created_at
+
+    if opp_dt is not None:
+        opp_date = opp_dt.date() if isinstance(opp_dt, datetime.datetime) else opp_dt
+        if opp_date > cutoff_date:
+            return False
+    return True
+
+
+def build_temporal_batches(
+    papers: List[Paper],
+    baseline_cutoff: Optional[datetime.date] = None,
+    explicit_cutoffs: Optional[List[datetime.date | str]] = None,
+    batch_window_days: Optional[int] = None,
+) -> List[TemporalBatch]:
+    """Constructs deterministic chronological batches for temporal evaluation."""
+    dated_papers = [p for p in papers if p.publication_date is not None]
+    if baseline_cutoff:
+        eval_papers = [p for p in dated_papers if p.publication_date > baseline_cutoff]
+    else:
+        eval_papers = dated_papers
+
+    if not eval_papers:
+        return []
+
+    eval_papers.sort(key=lambda p: (p.publication_date, str(p.id)))
+    min_date = eval_papers[0].publication_date
+    max_date = eval_papers[-1].publication_date
+
+    batches: List[TemporalBatch] = []
+
+    if explicit_cutoffs:
+        normalized_cutoffs: List[datetime.date] = []
+        for c in explicit_cutoffs:
+            if isinstance(c, str):
+                normalized_cutoffs.append(datetime.date.fromisoformat(c.split("T")[0]))
+            elif isinstance(c, datetime.datetime):
+                normalized_cutoffs.append(c.date())
+            elif isinstance(c, datetime.date):
+                normalized_cutoffs.append(c)
+        normalized_cutoffs.sort()
+
+        current_start = (
+            (baseline_cutoff + datetime.timedelta(days=1))
+            if baseline_cutoff
+            else min_date
+        )
+
+        for seq, c_date in enumerate(normalized_cutoffs):
+            if c_date < current_start:
+                continue
+            batch_id = f"batch_{seq}_{c_date.isoformat()}"
+            batches.append(
+                TemporalBatch(
+                    batch_id=batch_id,
+                    start_date=current_start,
+                    end_date=c_date,
+                    sequence_number=seq,
+                )
+            )
+            current_start = c_date + datetime.timedelta(days=1)
+
+    elif batch_window_days and batch_window_days > 0:
+        current_start = (
+            (baseline_cutoff + datetime.timedelta(days=1))
+            if baseline_cutoff
+            else min_date
+        )
+        seq = 0
+        while current_start <= max_date:
+            current_end = current_start + datetime.timedelta(days=batch_window_days - 1)
+            batch_id = f"batch_{seq}_{current_start.isoformat()}_{current_end.isoformat()}"
+            batches.append(
+                TemporalBatch(
+                    batch_id=batch_id,
+                    start_date=current_start,
+                    end_date=current_end,
+                    sequence_number=seq,
+                )
+            )
+            current_start = current_end + datetime.timedelta(days=1)
+            seq += 1
+
+    else:
+        distinct_dates = sorted(list({p.publication_date for p in eval_papers}))
+        current_start = (
+            (baseline_cutoff + datetime.timedelta(days=1))
+            if baseline_cutoff
+            else min_date
+        )
+        for seq, d in enumerate(distinct_dates):
+            batch_id = f"batch_{seq}_{d.isoformat()}"
+            batches.append(
+                TemporalBatch(
+                    batch_id=batch_id,
+                    start_date=current_start,
+                    end_date=d,
+                    sequence_number=seq,
+                )
+            )
+            current_start = d + datetime.timedelta(days=1)
+
+    return batches
 
 
 def _atomic_write_json(filepath: Path, data: Dict[str, Any]) -> None:
@@ -282,6 +440,14 @@ class ControlledExperimentRunner:
         ollama_timeout: Optional[float] = None,
         max_refinement_iterations: int = 2,
         temporal_cutoff: Optional[datetime.date | str | datetime.datetime] = None,
+        enable_stage_5: bool = False,
+        stage_5_batches: Optional[List[TemporalBatch]] = None,
+        stage_5_cutoffs: Optional[List[datetime.date | str]] = None,
+        stage_5_batch_window_days: Optional[int] = None,
+        stage_5_max_retries: int = 2,
+        stage_5_backoff_factor: float = 0.5,
+        stage_5_timeout: Optional[float] = None,
+        stage_5_chunk_size: Optional[int] = None,
     ):
         self.llm_provider = llm_provider
         self.embedding_provider = embedding_provider
@@ -296,6 +462,14 @@ class ControlledExperimentRunner:
         self.ollama_timeout = ollama_timeout
         self.max_refinement_iterations = max_refinement_iterations
         self.temporal_cutoff = normalize_cutoff_date(temporal_cutoff)
+        self.enable_stage_5 = enable_stage_5
+        self.stage_5_batches = stage_5_batches
+        self.stage_5_cutoffs = stage_5_cutoffs
+        self.stage_5_batch_window_days = stage_5_batch_window_days
+        self.stage_5_max_retries = stage_5_max_retries
+        self.stage_5_backoff_factor = stage_5_backoff_factor
+        self.stage_5_timeout = stage_5_timeout
+        self.stage_5_chunk_size = stage_5_chunk_size
 
     def _resolve_manifest(self, input_dir: Path) -> List[PaperInputMetadata]:
         """Discovers PDF files in input_dir and matches against optional manifest."""
@@ -430,6 +604,19 @@ class ControlledExperimentRunner:
         is_persistent_db = False
         interrupted = False
 
+        # 0. Run offline corpus metadata and publication-date preflight
+        try:
+            preflight_report = run_corpus_preflight(input_dir_path)
+            logger.info(
+                f"Corpus Preflight: {preflight_report.total_papers} papers "
+                f"({preflight_report.dated_papers_count} dated, "
+                f"{preflight_report.undated_papers_count} undated, "
+                f"{preflight_report.malformed_dates_count} malformed)"
+            )
+        except Exception as pf_err:
+            preflight_report = None
+            logger.warning(f"Corpus preflight check could not be completed: {pf_err}")
+
         # 1. Resolve and validate input papers
         try:
             paper_inputs = self._resolve_manifest(input_dir_path)
@@ -473,6 +660,7 @@ class ControlledExperimentRunner:
             connect_args={"check_same_thread": False},
             poolclass=StaticPool,
         )
+        configure_sqlite_foreign_keys(engine)
         Base.metadata.create_all(engine)
         SessionMaker = sessionmaker(bind=engine)
         session: Session = SessionMaker()
@@ -513,6 +701,11 @@ class ControlledExperimentRunner:
             ollama_timeout=resolved_timeout,
             max_refinement_iterations=self.max_refinement_iterations,
             temporal_cutoff=str(self.temporal_cutoff) if self.temporal_cutoff else None,
+            enable_stage_5=self.enable_stage_5,
+            stage_5_batch_window_days=self.stage_5_batch_window_days,
+            stage_5_cutoffs=[str(c) for c in self.stage_5_cutoffs] if self.stage_5_cutoffs else None,
+            stage_5_chunk_size=self.stage_5_chunk_size,
+            stage_5_max_retries=self.stage_5_max_retries,
         )
 
         # 4. Check configuration consistency against existing database
@@ -632,6 +825,7 @@ class ControlledExperimentRunner:
                 "production_postgresql_connected": False,
                 "corpus_hashes": corpus_hashes,
                 "configuration_fingerprint": current_fingerprint,
+                "corpus_preflight": preflight_report.to_dict() if preflight_report else None,
                 "interrupted": False,
             },
             "papers_input": [p.to_dict() for p in paper_inputs],
@@ -640,6 +834,7 @@ class ControlledExperimentRunner:
             "understanding": {},
             "discovery": {},
             "opportunities": {},
+            "stage_5_evolution": {},
             "timings_seconds": {},
         }
 
@@ -1016,6 +1211,12 @@ class ControlledExperimentRunner:
                     )
                     if existing_opp:
                         logger.info(f"Reusing existing research opportunity for gap {gap_id}")
+                        try:
+                            bridge_svc = OpportunityBridgeService(session)
+                            bridge_svc.bridge_opportunity(existing_opp)
+                            session.commit()
+                        except Exception as bridge_err:
+                            logger.warning(f"Failed to bridge cached opportunity {existing_opp.id}: {bridge_err}")
                         report_service = OpportunityReportService(session)
                         report = report_service.generate_opportunity_report(existing_opp.id)
                         opportunities_generated.append({
@@ -1131,6 +1332,214 @@ class ControlledExperimentRunner:
                 }
 
             metrics["timings_seconds"]["opportunity_total"] = round(time.time() - opp_start, 2)
+            self._checkpoint_metrics(metrics)
+
+            # ── STAGE 5: TEMPORAL OPPORTUNITY EVOLUTION (OPTIONAL) ─────────
+            if self.enable_stage_5:
+                s5_start = time.time()
+                logger.info("Executing Stage 5: Temporal Opportunity Evolution...")
+                try:
+                    # 1. Ensure all validated opportunities are bridged to lifecycle entities
+                    bridge_svc = OpportunityBridgeService(session)
+                    for rec in session.query(ResearchOpportunityRecord).all():
+                        try:
+                            opp_entity = bridge_svc.bridge_opportunity(rec)
+                            if opp_entity and self.temporal_cutoff:
+                                cutoff_dt = datetime.datetime.combine(self.temporal_cutoff, datetime.time.min)
+                                if opp_entity.created_at and opp_entity.created_at > cutoff_dt:
+                                    opp_entity.created_at = cutoff_dt
+                        except Exception as b_err:
+                            logger.warning(f"Failed to bridge opportunity {rec.id} for Stage 5: {b_err}")
+                    session.commit()
+
+                    all_opportunities = session.query(Opportunity).all()
+                    if not all_opportunities:
+                        logger.info("Stage 5: No opportunities available to evolve.")
+                        metrics["stage_5_evolution"] = {
+                            "status": "NO_OPPORTUNITIES",
+                            "enabled": True,
+                            "batches_evaluated_count": 0,
+                            "total_opportunities_evaluated": 0,
+                            "total_events_count": 0,
+                            "total_status_transitions_count": 0,
+                            "per_batch_metrics": [],
+                            "metric_interpretation_note": (
+                                "Stage 5 measures descriptive temporal evolution counts (relationships, transitions, status distribution). "
+                                "These values represent event volume and trajectory progression, not empirical accuracy, precision, or research "
+                                "validity without human-annotated gold standard data."
+                            ),
+                        }
+                        metrics["timings_seconds"]["stage_5_evolution_total"] = round(time.time() - s5_start, 2)
+                        self._checkpoint_metrics(metrics)
+                    else:
+                        all_db_papers = session.query(Paper).all()
+                        dated_papers = [p for p in all_db_papers if p.publication_date is not None]
+                        undated_papers = [p for p in all_db_papers if p.publication_date is None]
+
+                        # 2. Determine temporal batches
+                        if self.stage_5_batches:
+                            batches = sorted(self.stage_5_batches, key=lambda b: (b.sequence_number, b.start_date))
+                        else:
+                            batches = build_temporal_batches(
+                                papers=all_db_papers,
+                                baseline_cutoff=self.temporal_cutoff,
+                                explicit_cutoffs=self.stage_5_cutoffs,
+                                batch_window_days=self.stage_5_batch_window_days,
+                            )
+
+                        if not batches:
+                            logger.info("Stage 5: No temporal batches could be formed from available papers.")
+                            metrics["stage_5_evolution"] = {
+                                "status": "NO_EVALUATION_BATCHES",
+                                "enabled": True,
+                                "batches_evaluated_count": 0,
+                                "total_opportunities_evaluated": len(all_opportunities),
+                                "total_events_count": 0,
+                                "total_status_transitions_count": 0,
+                                "per_batch_metrics": [],
+                                "metric_interpretation_note": (
+                                    "Stage 5 measures descriptive temporal evolution counts (relationships, transitions, status distribution). "
+                                    "These values represent event volume and trajectory progression, not empirical accuracy, precision, or research "
+                                    "validity without human-annotated gold standard data."
+                                ),
+                            }
+                            metrics["timings_seconds"]["stage_5_evolution_total"] = round(time.time() - s5_start, 2)
+                            self._checkpoint_metrics(metrics)
+                        else:
+                            # 3. Instantiate evolution services
+                            classifier = RelationshipClassifier(
+                                provider=llm,
+                                timeout=self.stage_5_timeout or self.ollama_timeout,
+                                max_retries=self.stage_5_max_retries,
+                                backoff_factor=self.stage_5_backoff_factor,
+                            )
+                            transition_svc = OpportunityTransitionService(session)
+                            integration_svc = OpportunityClassificationIntegration(classifier, transition_svc, session)
+                            evolution_svc = OpportunityEvolutionService(integration_svc)
+
+                            per_batch_metrics: List[Dict[str, Any]] = []
+                            total_events = 0
+                            total_transitions = 0
+
+                            for batch in batches:
+                                # Papers strictly within batch date range (future-data isolated)
+                                batch_eligible = [
+                                    p for p in dated_papers
+                                    if batch.start_date <= p.publication_date <= batch.end_date
+                                ]
+                                batch_eligible.sort(key=lambda p: (p.publication_date, str(p.id)))
+
+                                # Precise exclusions
+                                undated_excluded = len(undated_papers)
+                                future_excluded = sum(1 for p in dated_papers if p.publication_date > batch.end_date)
+                                past_excluded = sum(1 for p in dated_papers if p.publication_date < batch.start_date)
+                                total_excluded = undated_excluded + future_excluded + past_excluded
+
+                                # Opportunities created/available at or before batch cutoff
+                                eligible_opps = [
+                                    opp for opp in all_opportunities
+                                    if is_opportunity_available_at_cutoff(opp, batch.end_date)
+                                ]
+                                future_opps_skipped = len(all_opportunities) - len(eligible_opps)
+
+                                batch_processed = 0
+                                batch_skipped = 0
+                                batch_rejections = 0
+                                batch_transitions: List[Dict[str, Any]] = []
+                                batch_rel_counts = {r.value: 0 for r in OpportunityRelationship}
+
+                                for opp in eligible_opps:
+                                    res = evolution_svc.process_batch(
+                                        db=session,
+                                        opportunity_id=opp.id,
+                                        batch=batch,
+                                        papers=batch_eligible,
+                                        chunk_size=self.stage_5_chunk_size,
+                                    )
+                                    for ev in res.events:
+                                        batch_rel_counts[ev.relationship.value] = batch_rel_counts.get(ev.relationship.value, 0) + 1
+                                        total_events += 1
+                                        if ev.state_changed:
+                                            batch_transitions.append({
+                                                "opportunity_id": str(opp.id),
+                                                "paper_id": str(ev.paper_id),
+                                                "publication_date": str(ev.publication_date),
+                                                "previous_status": ev.previous_status.value,
+                                                "new_status": ev.new_status.value,
+                                                "relationship": ev.relationship.value,
+                                            })
+                                            total_transitions += 1
+                                    batch_processed += res.processed_paper_count
+                                    batch_skipped += res.skipped_paper_count
+                                    batch_rejections += getattr(res, "grounding_rejections_count", 0)
+
+                                # Lifecycle status distribution of eligible opportunities at end of batch
+                                status_dist: Dict[str, int] = {}
+                                for opp in eligible_opps:
+                                    session.refresh(opp)
+                                    status_dist[opp.status] = status_dist.get(opp.status, 0) + 1
+
+                                batch_m = {
+                                    "batch_id": batch.batch_id,
+                                    "sequence_number": batch.sequence_number,
+                                    "start_date": batch.start_date.isoformat(),
+                                    "cutoff_date": batch.end_date.isoformat(),
+                                    "eligible_paper_count": len(batch_eligible),
+                                    "excluded_paper_count": total_excluded,
+                                    "undated_papers_excluded_count": undated_excluded,
+                                    "future_papers_excluded_count": future_excluded,
+                                    "opportunities_evaluated": len(eligible_opps),
+                                    "opportunities_skipped_future_count": future_opps_skipped,
+                                    "processed_papers": batch_processed,
+                                    "skipped_papers": batch_skipped,
+                                    "relationship_counts": batch_rel_counts,
+                                    "lifecycle_status_counts": status_dist,
+                                    "status_transitions_count": len(batch_transitions),
+                                    "status_transitions": batch_transitions,
+                                    "grounding_rejections_count": batch_rejections,
+                                    "failures_count": 0,
+                                    "failures": [],
+                                }
+                                per_batch_metrics.append(batch_m)
+                                self._checkpoint_metrics(metrics)
+
+                            metrics["stage_5_evolution"] = {
+                                "status": "COMPLETED",
+                                "enabled": True,
+                                "batches_evaluated_count": len(batches),
+                                "total_opportunities_evaluated": len(all_opportunities),
+                                "total_events_count": total_events,
+                                "total_status_transitions_count": total_transitions,
+                                "per_batch_metrics": per_batch_metrics,
+                                "metric_interpretation_note": (
+                                    "Stage 5 measures descriptive temporal evolution counts (relationships, transitions, status distribution). "
+                                    "These values represent event volume and trajectory progression, not empirical accuracy, precision, or research "
+                                    "validity without human-annotated gold standard data."
+                                ),
+                            }
+                            metrics["timings_seconds"]["stage_5_evolution_total"] = round(time.time() - s5_start, 2)
+                            self._checkpoint_metrics(metrics)
+
+                except Exception as s5_err:
+                    logger.error(f"Stage 5 temporal evolution failed: {s5_err}")
+                    metrics["stage_5_evolution"] = {
+                        "status": "FAILED",
+                        "enabled": True,
+                        "error": str(s5_err),
+                        "failures": [str(s5_err)],
+                        "per_batch_metrics": per_batch_metrics if "per_batch_metrics" in locals() else [],
+                    }
+                    metrics["timings_seconds"]["stage_5_evolution_total"] = round(time.time() - s5_start, 2)
+                    failure_reason = f"Stage 5 evolution failed: {s5_err}"
+                    metrics["fatal_error"] = failure_reason
+                    self._checkpoint_metrics(metrics)
+                    return self._finalize_result(False, metrics, session, error=failure_reason)
+            else:
+                metrics["stage_5_evolution"] = {
+                    "status": "DISABLED",
+                    "enabled": False,
+                }
+
             metrics["timings_seconds"]["pipeline_wall_time_total"] = round(time.time() - start_time, 2)
 
             return self._finalize_result(True, metrics, session)
@@ -1240,6 +1649,20 @@ class ControlledExperimentRunner:
             f"- **Max Refinement Iterations**: `{refine_val}`",
             f"- **Total Wall Time**: `{timings.get('pipeline_wall_time_total', 'N/A')}s`",
             f"- **Database Isolation**: `{meta.get('database_mode', 'N/A')}` (PostgreSQL disconnected: `True`)",
+        ]
+
+        if meta.get("corpus_preflight"):
+            pf = meta["corpus_preflight"]
+            dr = pf.get("date_range", {})
+            md.extend([
+                "",
+                "## 0. Corpus Preflight Summary",
+                f"- Total Papers: **{pf.get('total_papers', 0)}** ({pf.get('dated_papers_count', 0)} dated, {pf.get('undated_papers_count', 0)} undated, {pf.get('malformed_dates_count', 0)} malformed)",
+                f"- Date Range: `{dr.get('earliest', 'N/A')}` to `{dr.get('latest', 'N/A')}`",
+                f"- Temporal Impact: *{pf.get('temporal_evaluation_impact', '')}*",
+            ])
+
+        md.extend([
             "",
             "## 1. Ingestion Summary",
             f"- Papers Ingested: **{ingest.get('ingested_count', 0)}** (Reused: {ingest.get('reused_count', 0)}, Failed: {ingest.get('failed_count', 0)})",
@@ -1249,7 +1672,7 @@ class ControlledExperimentRunner:
             "## 2. Paper Understanding",
             f"- Papers Processed: **{under.get('understood_count', 0)}** (Resumed: {under.get('resumed_count', 0)})",
             f"- Statements Extracted: **{under.get('total_statements_extracted', 0)}**",
-        ]
+        ])
         if "eligible_statements_extracted" in under:
             md.append(f"- Statements Eligible for Cutoff ({under.get('temporal_cutoff')}): **{under.get('eligible_statements_extracted')}**")
         md.extend([
@@ -1284,6 +1707,30 @@ class ControlledExperimentRunner:
                 md.append(f"  - Prior Art Statements: {o.get('prior_art_statements_count')}")
                 md.append(f"  - Novelty: `{o.get('novelty_assessment')}`")
 
+        s5 = metrics.get("stage_5_evolution", {})
+        if s5.get("enabled"):
+            md.extend([
+                "",
+                "## 5. Temporal Opportunity Evolution (Stage 5)",
+                f"- Status: **{s5.get('status', 'N/A')}**",
+                f"- Batches Evaluated: **{s5.get('batches_evaluated_count', 0)}**",
+                f"- Opportunities Evaluated: **{s5.get('total_opportunities_evaluated', 0)}**",
+                f"- Evolution Events: **{s5.get('total_events_count', 0)}**",
+                f"- Status Transitions: **{s5.get('total_status_transitions_count', 0)}**",
+                f"- Evolution Wall Time: **{timings.get('stage_5_evolution_total', 'N/A')}s**",
+            ])
+            if s5.get("per_batch_metrics"):
+                md.append("")
+                md.append("### Batch Breakdown:")
+                for b in s5["per_batch_metrics"]:
+                    md.append(
+                        f"- Batch `{b.get('batch_id')}` (Cutoff: {b.get('cutoff_date')}): "
+                        f"{b.get('eligible_paper_count')} eligible papers, "
+                        f"{b.get('opportunities_evaluated')} opps evaluated, "
+                        f"{b.get('status_transitions_count')} transitions, "
+                        f"{b.get('grounding_rejections_count', 0)} grounding rejections"
+                    )
+
         md.append("")
         return "\n".join(md)
 
@@ -1302,9 +1749,22 @@ def main():
     parser.add_argument("--ollama-timeout", default=None, type=float, help="Ollama request timeout in seconds")
     parser.add_argument("--max-refinement-iterations", default=2, type=int, help="Maximum refinement iterations for opportunity generation")
     parser.add_argument("--cutoff-date", default=None, type=str, help="Historical evaluation cutoff date (YYYY-MM-DD)")
+    parser.add_argument("--enable-stage-5", action="store_true", default=False, help="Enable Stage 5 temporal opportunity evolution evaluation")
+    parser.add_argument("--stage-5-batch-window-days", default=None, type=int, help="Window size in days for Stage 5 temporal batches")
+    parser.add_argument("--stage-5-cutoffs", default=None, type=str, nargs="+", help="Explicit chronological cutoff dates for Stage 5 (YYYY-MM-DD ...)")
+    parser.add_argument("--stage-5-chunk-size", default=None, type=int, help="Chunk size for Stage 5 batch processing")
+    parser.add_argument("--stage-5-max-retries", default=2, type=int, help="Maximum retries for Stage 5 LLM relationship classification")
+    parser.add_argument("--stage-5-backoff-factor", default=0.5, type=float, help="Exponential backoff factor for Stage 5 retries")
+    parser.add_argument("--stage-5-timeout", default=None, type=float, help="Per-call timeout for Stage 5 relationship classification")
+    parser.add_argument("--preflight-only", action="store_true", default=False, help="Run offline corpus preflight report and exit")
 
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    if args.preflight_only:
+        report = run_corpus_preflight(args.input_dir)
+        print(report.summary())
+        sys.exit(0)
 
     runner = ControlledExperimentRunner(
         db_path=args.db_path,
@@ -1317,6 +1777,13 @@ def main():
         ollama_timeout=args.ollama_timeout,
         max_refinement_iterations=args.max_refinement_iterations,
         temporal_cutoff=args.cutoff_date,
+        enable_stage_5=args.enable_stage_5,
+        stage_5_batch_window_days=args.stage_5_batch_window_days,
+        stage_5_cutoffs=args.stage_5_cutoffs,
+        stage_5_max_retries=args.stage_5_max_retries,
+        stage_5_backoff_factor=args.stage_5_backoff_factor,
+        stage_5_timeout=args.stage_5_timeout,
+        stage_5_chunk_size=args.stage_5_chunk_size,
     )
 
     result = runner.run(input_dir=args.input_dir)

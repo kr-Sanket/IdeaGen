@@ -1,5 +1,5 @@
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Optional
 import sqlalchemy
 from sqlalchemy import String, Date, Text, DateTime, Index
@@ -112,8 +112,22 @@ class Opportunity(Base):
         CheckConstraint('confidence >= 0.0 AND confidence <= 1.0', name='check_confidence_bounds'),
     )
     
+    research_opportunity_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sqlalchemy.ForeignKey("research_opportunities.id", ondelete="SET NULL"),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    gap_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        sqlalchemy.ForeignKey("research_gaps.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     evidence: Mapped[list["OpportunityEvidence"]] = relationship(back_populates="opportunity", cascade="all, delete-orphan")
     history: Mapped[list["OpportunityHistory"]] = relationship(back_populates="opportunity", cascade="all, delete-orphan")
+    research_opportunity: Mapped[Optional["ResearchOpportunityRecord"]] = relationship(back_populates="lifecycle_opportunity")
+    gap: Mapped[Optional["ResearchGap"]] = relationship()
 
 class OpportunityEvidence(Base):
     __tablename__ = "opportunity_evidence"
@@ -126,7 +140,11 @@ class OpportunityEvidence(Base):
     )
     supporting_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+    )
     
     opportunity: Mapped["Opportunity"] = relationship(back_populates="evidence")
 
@@ -146,7 +164,11 @@ class OpportunityHistory(Base):
     )
     evidence_id: Mapped[Optional[uuid.UUID]] = mapped_column(sqlalchemy.ForeignKey("opportunity_evidence.id", ondelete="SET NULL"), nullable=True)
     
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        server_default=func.now(),
+    )
     
     opportunity: Mapped["Opportunity"] = relationship(back_populates="history")
 
@@ -269,6 +291,7 @@ class ResearchOpportunityRecord(Base):
     gap: Mapped["ResearchGap"] = sqlalchemy.orm.relationship()
     assessments: Mapped[list["PriorArtAssessmentRecord"]] = sqlalchemy.orm.relationship(back_populates="opportunity", cascade="all, delete-orphan")
     iterations: Mapped[list["OpportunityRefinementRecord"]] = sqlalchemy.orm.relationship(back_populates="opportunity", cascade="all, delete-orphan")
+    lifecycle_opportunity: Mapped[Optional["Opportunity"]] = sqlalchemy.orm.relationship(back_populates="research_opportunity", uselist=False)
 
 
 class PriorArtAssessmentRecord(Base):

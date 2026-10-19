@@ -116,6 +116,30 @@ class OpportunityClassificationIntegration:
         if paper is None:
             raise ValueError(f"Paper {paper_id} not found.")
 
+        # ── 2b. Retrieve bounded stored passages ─────────────────────────
+        from ideagen.db.models import PaperPassage
+        from ideagen.opportunity.grounding import validate_evidence_grounding
+        from ideagen.understanding.passage_selector import PassageSelector
+
+        stored_passages = self._session.execute(
+            select(PaperPassage)
+            .where(PaperPassage.paper_id == paper_id)
+            .order_by(PaperPassage.passage_index)
+        ).scalars().all()
+
+        passage_context: Optional[str] = None
+        if stored_passages:
+            # Select bounded set of actual stored passages deterministically
+            selector = PassageSelector(max_passages=10, max_total_words=2000)
+            selected_passages = selector.select_passages(stored_passages)
+            passage_lines = []
+            for sp in selected_passages:
+                sec_header = f"[{sp.section}] " if sp.section else ""
+                passage_lines.append(f"{sec_header}{sp.text.strip()}")
+            passage_context = "\n\n".join(passage_lines)
+        elif evidence_excerpt:
+            passage_context = evidence_excerpt
+
         previous_status = OpportunityStatus(opportunity.status)
 
         # ── 3. Construct bounded classifier input ────────────────────────
@@ -125,11 +149,20 @@ class OpportunityClassificationIntegration:
             opportunity_description=opportunity.description,
             paper_title=paper.title,
             paper_abstract=paper.abstract,
-            paper_excerpt=evidence_excerpt,
+            paper_excerpt=passage_context,
         )
 
         # ── 4–5. Classify (errors propagate, no transition on failure) ───
         classification = self._classifier.classify(classifier_input)
+
+        # ── 5b. Fail-closed evidence grounding validation ────────────────
+        if stored_passages:
+            validate_evidence_grounding(
+                excerpt=classification.evidence_excerpt,
+                passages=stored_passages,
+                relationship=classification.relationship,
+                paper_id=paper_id,
+            )
 
         # ── 6–7. Delegate transition to existing service ─────────────────
         updated_opportunity = self._transition_service.apply_relationship(

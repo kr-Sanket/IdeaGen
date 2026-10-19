@@ -26,6 +26,9 @@ from ideagen.db import (
     ResearchStatement,
     ResearchGap,
     GapEvidence,
+    Opportunity,
+    OpportunityEvidence,
+    OpportunityHistory,
     ResearchOpportunityRecord,
     SQLAlchemyPersistenceLayer,
 )
@@ -36,6 +39,12 @@ from ideagen.api.schema import (
     EvidenceDetailDTO,
     StatementResponseDTO,
     OpportunityReportDTO,
+    OpportunityEvolveRequest,
+    OpportunityEvolveResponse,
+    OpportunityHistoryDTO,
+    OpportunityEvidenceDTO,
+    OpportunityEvolutionEventDTO,
+    PaperEvolutionErrorDTO,
     DemoScenarioResponse,
     DemoOpportunityOverview,
     SearchResponse,
@@ -50,6 +59,7 @@ from ideagen.discovery import SemanticGapDiscoveryPipeline, ResearchGapResponseD
 from ideagen.discovery.vector_index import StatementVectorIndex
 from ideagen.discovery.embeddings import get_default_embedding_provider
 from ideagen.llm import get_default_llm_provider
+from ideagen.opportunity.classifier import RelationshipClassifier
 from ideagen.generation.pipeline import ResearchOpportunityPipeline
 from ideagen.generation.models import ResearchOpportunityInputDTO, OpportunityStatus
 from ideagen.reporting.report_service import OpportunityReportService
@@ -507,6 +517,233 @@ def get_opportunity_report(opportunity_id: uuid.UUID, db: Session = Depends(get_
     if not report:
         raise HTTPException(status_code=404, detail=f"Opportunity report for ID {opportunity_id} not found.")
     return report
+
+
+# ── Opportunity Lifecycle Evolution Endpoints (Checkpoint 10) ──────────────
+
+def get_relationship_classifier() -> RelationshipClassifier:
+    """Dependency provider for RelationshipClassifier using configured LLM provider."""
+    provider = get_default_llm_provider()
+    return RelationshipClassifier(provider=provider)
+
+
+def resolve_lifecycle_opportunity(opportunity_id: uuid.UUID, db: Session) -> Opportunity:
+    """Resolves an Opportunity lifecycle entity from an Opportunity ID or bridged ResearchOpportunityRecord ID."""
+    opp = db.query(Opportunity).filter(Opportunity.id == opportunity_id).first()
+    if opp is not None:
+        return opp
+
+    # Check if opportunity_id belongs to a ResearchOpportunityRecord
+    rec = db.query(ResearchOpportunityRecord).filter(ResearchOpportunityRecord.id == opportunity_id).first()
+    if rec is not None:
+        from ideagen.opportunity.bridge import OpportunityBridgeService
+        bridge = OpportunityBridgeService(db)
+        opp = bridge.bridge_opportunity(rec)
+        if opp is not None:
+            return opp
+
+    raise HTTPException(status_code=404, detail=f"Opportunity {opportunity_id} not found.")
+
+
+@app.post("/api/v1/opportunities/{opportunity_id}/evolve", response_model=OpportunityEvolveResponse)
+@app.post("/api/opportunities/{opportunity_id}/evolve", response_model=OpportunityEvolveResponse)
+def evolve_opportunity(
+    opportunity_id: uuid.UUID,
+    req: OpportunityEvolveRequest,
+    db: Session = Depends(get_db),
+    classifier: RelationshipClassifier = Depends(get_relationship_classifier),
+):
+    """Evolves an opportunity's lifecycle status using independently verified paper evidence."""
+    opp = resolve_lifecycle_opportunity(opportunity_id, db)
+    initial_status = opp.status
+
+    if not req.paper_ids:
+        raise HTTPException(status_code=400, detail="paper_ids list cannot be empty.")
+    if len(req.paper_ids) > 100:
+        raise HTTPException(status_code=400, detail="Maximum 100 paper IDs allowed per request.")
+
+    # Validate cutoff date if provided
+    norm_cutoff: Optional[datetime.date] = None
+    if req.cutoff_date is not None:
+        from ideagen.discovery.temporal import normalize_cutoff_date
+        try:
+            norm_cutoff = normalize_cutoff_date(req.cutoff_date)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid cutoff date: {e}")
+
+    # Validate paper existence
+    papers = db.query(Paper).filter(Paper.id.in_(req.paper_ids)).all()
+    found_map = {p.id: p for p in papers}
+    missing_ids = [pid for pid in req.paper_ids if pid not in found_map]
+    if missing_ids:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Papers not found: {', '.join(str(pid) for pid in missing_ids)}",
+        )
+
+    # Exclude papers already recorded for this opportunity
+    existing_evidences = db.query(OpportunityEvidence).filter(
+        OpportunityEvidence.opportunity_id == opp.id
+    ).all()
+    already_recorded_ids = {ev.paper_id for ev in existing_evidences}
+
+    # Partition into eligible vs skipped
+    eligible_papers: List[Paper] = []
+    skipped_count = 0
+    errors: List[PaperEvolutionErrorDTO] = []
+    events: List[OpportunityEvolutionEventDTO] = []
+
+    for pid in req.paper_ids:
+        p = found_map[pid]
+        if p.id in already_recorded_ids:
+            skipped_count += 1
+            continue
+
+        if norm_cutoff is not None:
+            if p.publication_date is None:
+                skipped_count += 1
+                continue
+            if p.publication_date > norm_cutoff:
+                skipped_count += 1
+                continue
+
+        eligible_papers.append(p)
+
+    processed_count = 0
+    failed_count = 0
+
+    if eligible_papers:
+        from ideagen.opportunity.service import OpportunityTransitionService
+        from ideagen.opportunity.integration import OpportunityClassificationIntegration
+        from ideagen.opportunity.temporal import OpportunityEvolutionService, TemporalBatch
+
+        trans_service = OpportunityTransitionService(db)
+        integration = OpportunityClassificationIntegration(classifier, trans_service, db)
+        evolution_service = OpportunityEvolutionService(integration)
+
+        start_date = datetime.date(1900, 1, 1)
+        end_date = norm_cutoff if norm_cutoff is not None else datetime.date(2100, 1, 1)
+        batch = TemporalBatch(
+            batch_id=f"evolve_{uuid.uuid4().hex[:8]}",
+            start_date=start_date,
+            end_date=end_date,
+            sequence_number=1,
+        )
+
+        for p in eligible_papers:
+            try:
+                batch_res = evolution_service.process_batch(
+                    db=db,
+                    opportunity_id=opp.id,
+                    batch=batch,
+                    papers=[p],
+                )
+                processed_count += batch_res.processed_paper_count
+                skipped_count += batch_res.skipped_paper_count
+                for ev in batch_res.events:
+                    events.append(
+                        OpportunityEvolutionEventDTO(
+                            paper_id=ev.paper_id,
+                            relationship=ev.relationship.value,
+                            previous_status=ev.previous_status.value,
+                            new_status=ev.new_status.value,
+                            state_changed=ev.state_changed,
+                            evidence_id=ev.evidence_id,
+                            history_id=ev.history_id,
+                        )
+                    )
+            except Exception as e:
+                failed_count += 1
+                errors.append(
+                    PaperEvolutionErrorDTO(
+                        paper_id=p.id,
+                        reason="Classification or transition failed for paper.",
+                    )
+                )
+
+    db.commit()
+    db.refresh(opp)
+
+    return OpportunityEvolveResponse(
+        opportunity_id=opp.id,
+        initial_status=initial_status,
+        final_status=opp.status,
+        processed_count=processed_count,
+        skipped_count=skipped_count,
+        failed_count=failed_count,
+        events=events,
+        errors=errors,
+    )
+
+
+@app.get("/api/v1/opportunities/{opportunity_id}/history", response_model=List[OpportunityHistoryDTO])
+@app.get("/api/opportunities/{opportunity_id}/history", response_model=List[OpportunityHistoryDTO])
+def get_opportunity_history(opportunity_id: uuid.UUID, db: Session = Depends(get_db)):
+    """Retrieves persisted lifecycle history in chronological order."""
+    opp = resolve_lifecycle_opportunity(opportunity_id, db)
+    histories = (
+        db.query(OpportunityHistory)
+        .filter(OpportunityHistory.opportunity_id == opp.id)
+        .order_by(OpportunityHistory.created_at.asc(), OpportunityHistory.id.asc())
+        .all()
+    )
+    return [
+        OpportunityHistoryDTO(
+            id=h.id,
+            opportunity_id=h.opportunity_id,
+            previous_status=h.previous_status,
+            new_status=h.new_status,
+            trigger_type=h.trigger_type,
+            evidence_id=h.evidence_id,
+            created_at=h.created_at.isoformat() if h.created_at else None,
+        )
+        for h in histories
+    ]
+
+
+@app.get("/api/v1/opportunities/{opportunity_id}/evidence", response_model=List[OpportunityEvidenceDTO])
+@app.get("/api/opportunities/{opportunity_id}/evidence", response_model=List[OpportunityEvidenceDTO])
+def get_opportunity_evidence(opportunity_id: uuid.UUID, db: Session = Depends(get_db)):
+    """Retrieves persisted evidence records linked to the opportunity."""
+    opp = resolve_lifecycle_opportunity(opportunity_id, db)
+    evidences = (
+        db.query(OpportunityEvidence)
+        .filter(OpportunityEvidence.opportunity_id == opp.id)
+        .order_by(OpportunityEvidence.created_at.asc(), OpportunityEvidence.id.asc())
+        .all()
+    )
+
+    ev_paper_ids = list({ev.paper_id for ev in evidences})
+    papers = db.query(Paper).filter(Paper.id.in_(ev_paper_ids)).all() if ev_paper_ids else []
+    paper_map = {p.id: p for p in papers}
+
+    passages = db.query(PaperPassage).filter(PaperPassage.paper_id.in_(ev_paper_ids)).all() if ev_paper_ids else []
+    passage_map: Dict[uuid.UUID, List[PaperPassage]] = {}
+    for psg in passages:
+        passage_map.setdefault(psg.paper_id, []).append(psg)
+
+    from ideagen.opportunity.service import is_evidence_grounded_for_paper
+
+    results = []
+    for ev in evidences:
+        p = paper_map.get(ev.paper_id)
+        p_passages = passage_map.get(ev.paper_id, [])
+        is_verified = is_evidence_grounded_for_paper(ev, p, p_passages) if p else False
+
+        results.append(
+            OpportunityEvidenceDTO(
+                id=ev.id,
+                opportunity_id=ev.opportunity_id,
+                paper_id=ev.paper_id,
+                paper_title=p.title if p and p.title else None,
+                relationship=ev.evidence_type,
+                confidence=None,
+                supporting_text=ev.supporting_text,
+                verified=is_verified,
+                created_at=ev.created_at.isoformat() if ev.created_at else None,
+            )
+        )
+    return results
 
 
 @app.get("/api/v1/evidence/{statement_id}", response_model=EvidenceDetailDTO)

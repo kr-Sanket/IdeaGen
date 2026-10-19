@@ -199,3 +199,58 @@ class SearchResponse(BaseModel):
 
 class AnalyzeRequest(BaseModel):
     papers: List[SearchResultPaper]
+
+
+# ── Opportunity Evolution Subsystem DTOs (Checkpoint 10) ───────────────────
+
+class OpportunityEvolveRequest(BaseModel):
+    paper_ids: List[uuid.UUID] = Field(..., min_length=1, max_length=100, description="Bounded set of eligible paper IDs")
+    cutoff_date: Optional[str] = Field(None, description="Optional ISO cutoff date YYYY-MM-DD")
+
+
+class OpportunityEvolutionEventDTO(BaseModel):
+    paper_id: uuid.UUID
+    relationship: str
+    previous_status: str
+    new_status: str
+    state_changed: bool
+    evidence_id: Optional[uuid.UUID] = None
+    history_id: Optional[uuid.UUID] = None
+
+
+class PaperEvolutionErrorDTO(BaseModel):
+    paper_id: uuid.UUID
+    reason: str
+
+
+class OpportunityEvolveResponse(BaseModel):
+    opportunity_id: uuid.UUID
+    initial_status: str
+    final_status: str
+    processed_count: int
+    skipped_count: int
+    failed_count: int
+    events: List[OpportunityEvolutionEventDTO] = Field(default_factory=list)
+    errors: List[PaperEvolutionErrorDTO] = Field(default_factory=list)
+
+
+class OpportunityHistoryDTO(BaseModel):
+    id: uuid.UUID
+    opportunity_id: uuid.UUID
+    previous_status: str
+    new_status: str
+    trigger_type: str
+    evidence_id: Optional[uuid.UUID] = None
+    created_at: Optional[str] = None
+
+
+class OpportunityEvidenceDTO(BaseModel):
+    id: uuid.UUID
+    opportunity_id: uuid.UUID
+    paper_id: uuid.UUID
+    paper_title: Optional[str] = None
+    relationship: str
+    confidence: Optional[float] = None
+    supporting_text: Optional[str] = None
+    verified: bool
+    created_at: Optional[str] = None

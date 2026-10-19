@@ -3,7 +3,7 @@
 import pytest
 import uuid
 from typing import Type, TypeVar
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from ideagen.generation.models import ResearchOpportunityInputDTO
 from ideagen.generation.generator import OpportunityGenerator, LLMCandidateOpportunitySchema
@@ -84,3 +84,48 @@ def test_llm_backed_generator_success():
     assert candidate.proposed_research_direction == mock_llm_response.proposed_research_direction
     assert candidate.feasibility.feasibility_score == 0.9
     assert candidate.confidence == 0.85
+
+
+def test_generation_prompt_specifies_normalized_feasibility_scale():
+    generator = OpportunityGenerator(llm_provider=MockLLMProvider())
+    input_dto = ResearchOpportunityInputDTO(
+        gap_id=uuid.uuid4(),
+        gap_statement="Test gap",
+        research_problem="Test problem",
+    )
+    prompt = generator._build_generation_prompt(input_dto)
+    assert "feasibility_score as a normalized float from 0.0 to 1.0" in prompt
+    assert "Do NOT use a 1-10 scale or a percentage" in prompt
+
+
+def test_candidate_opportunity_schema_accepts_valid_feasibility_score():
+    candidate = LLMCandidateOpportunitySchema(
+        proposed_research_direction="Direction",
+        reasoning="Reasoning",
+        technical_approach="Approach",
+        expected_contribution="Contribution",
+        required_data="Data",
+        required_compute="Compute",
+        implementation_complexity="Complexity",
+        experimental_setup="Setup",
+        feasibility_score=0.85,
+        confidence=0.75,
+    )
+    assert candidate.feasibility_score == 0.85
+
+
+def test_candidate_opportunity_schema_rejects_out_of_range_feasibility_score():
+    with pytest.raises(ValidationError) as exc_info:
+        LLMCandidateOpportunitySchema(
+            proposed_research_direction="Direction",
+            reasoning="Reasoning",
+            technical_approach="Approach",
+            expected_contribution="Contribution",
+            required_data="Data",
+            required_compute="Compute",
+            implementation_complexity="Complexity",
+            experimental_setup="Setup",
+            feasibility_score=8,
+            confidence=0.75,
+        )
+    assert "Input should be less than or equal to 1" in str(exc_info.value)

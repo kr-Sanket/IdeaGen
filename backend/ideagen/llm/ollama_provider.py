@@ -29,12 +29,18 @@ class OllamaLLMProvider(LLMProvider):
         self.timeout = timeout
         self.num_ctx = num_ctx
 
-    def generate_structured(self, prompt: str, response_schema: Type[T]) -> T:
+    def generate_structured(
+        self,
+        prompt: str,
+        response_schema: Type[T],
+        timeout: Optional[float] = None,
+    ) -> T:
         """Generates a structured response validated against the provided Pydantic schema.
 
         Args:
             prompt: The instruction and context prompt.
             response_schema: A Pydantic model class defining the expected output.
+            timeout: Optional per-call request timeout in seconds.
 
         Returns:
             An instance of response_schema.
@@ -44,6 +50,7 @@ class OllamaLLMProvider(LLMProvider):
             MalformedResponseError: If Ollama output cannot be parsed or fails schema validation.
         """
         chat_url = f"{self.base_url}/api/chat"
+        eff_timeout = timeout if timeout is not None else self.timeout
 
         try:
             schema_dict = response_schema.model_json_schema()
@@ -54,6 +61,7 @@ class OllamaLLMProvider(LLMProvider):
             "model": self.model_name,
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
+            "think": False,
             "format": schema_dict,
             "options": {
                 "temperature": 0.0,
@@ -65,10 +73,10 @@ class OllamaLLMProvider(LLMProvider):
             response = requests.post(
                 chat_url,
                 json=payload,
-                timeout=self.timeout,
+                timeout=eff_timeout,
             )
         except requests.exceptions.Timeout as e:
-            raise ProviderFailureError(f"Ollama request timed out after {self.timeout}s: {e}") from e
+            raise ProviderFailureError(f"Ollama request timed out after {eff_timeout}s: {e}") from e
         except requests.exceptions.RequestException as e:
             raise ProviderFailureError(f"Ollama connection error: {e}") from e
 

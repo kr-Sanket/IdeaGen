@@ -30,7 +30,7 @@ from tests.opportunity.fake_provider import FakeLLMProvider
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
-def _make_paper(session, title="Test Paper", abstract="Test abstract."):
+def _make_paper(session, title="Test Paper", abstract="Test abstract containing mock excerpt and a bounded excerpt."):
     """Create and persist a minimal Paper."""
     paper = Paper(
         source_type=SourceType.OPENALEX_API.value,
