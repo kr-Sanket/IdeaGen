@@ -32,15 +32,79 @@ Statement: {gap_statement}
 Research Problem: {research_problem}
 Why Insufficient: {why_insufficient}
 
-PROVIDED EVIDENCE STATEMENTS:
+PROVIDED EVIDENCE STATEMENTS & ORIGINAL SOURCE PASSAGES:
 {evidence_block}
 
 RULES:
 1. Determine if the evidence genuinely substantiates the candidate gap (VALID) or if it is ungrounded / unsupported / trivial (REJECT).
-2. Ground all reasoning in the provided statements.
+2. Ground all reasoning in the provided statements and their original source passages.
 3. Every cited statement ID in supporting_evidence_statement_ids or counter_evidence_statement_ids MUST match an ID listed above.
-4. Output strictly conforming to the JSON schema.
+4. If a statement's source passage is unavailable or contradicts the claimed limitation, evaluate it critically.
+5. Output strictly conforming to the JSON schema.
 """
+
+MAX_PASSAGE_EXCERPT_CHARS = 800
+
+
+def _resolve_passage_text(
+    statement: Any,
+    passages_by_id: Optional[Dict[uuid.UUID, Any]] = None,
+    max_chars: int = MAX_PASSAGE_EXCERPT_CHARS,
+) -> str:
+    """Resolves and bounds the original passage text for a research statement.
+
+    Returns an explicit unavailable indicator if passage is missing, unlinked, or invalid.
+    Never fabricates passage text.
+    """
+    raw_pid = getattr(statement, "passage_id", None) if hasattr(statement, "passage_id") else (
+        statement.get("passage_id") if isinstance(statement, dict) else None
+    )
+
+    if raw_pid is None:
+        return "[Source passage unavailable - no linked passage]"
+
+    try:
+        if isinstance(raw_pid, str):
+            passage_uuid = uuid.UUID(raw_pid.strip())
+        elif isinstance(raw_pid, uuid.UUID):
+            passage_uuid = raw_pid
+        else:
+            return "[Source passage unavailable - invalid passage ID]"
+    except (ValueError, AttributeError):
+        return "[Source passage unavailable - invalid passage ID]"
+
+    # Resolve passage object from mapping or directly from statement relationship
+    passage_obj = None
+    if passages_by_id and passage_uuid in passages_by_id:
+        passage_obj = passages_by_id[passage_uuid]
+    elif getattr(statement, "passage", None) is not None:
+        passage_obj = getattr(statement, "passage")
+    elif isinstance(statement, dict) and statement.get("passage") is not None:
+        passage_obj = statement.get("passage")
+
+    raw_text = None
+    if passage_obj is not None:
+        if isinstance(passage_obj, str):
+            raw_text = passage_obj
+        elif hasattr(passage_obj, "text"):
+            raw_text = passage_obj.text
+        elif isinstance(passage_obj, dict):
+            raw_text = passage_obj.get("text")
+
+    if not raw_text:
+        # Fallback to direct attribute on statement if provided
+        if hasattr(statement, "passage_text") and statement.passage_text:
+            raw_text = statement.passage_text
+        elif isinstance(statement, dict) and statement.get("passage_text"):
+            raw_text = statement.get("passage_text")
+
+    if not raw_text or not str(raw_text).strip():
+        return "[Source passage unavailable - passage not found in database]"
+
+    clean_text = " ".join(str(raw_text).strip().split())
+    if len(clean_text) > max_chars:
+        return clean_text[:max_chars].rstrip() + "..."
+    return clean_text
 
 
 class GapValidator:
@@ -54,6 +118,7 @@ class GapValidator:
         self,
         candidate: GapCandidate,
         statements_by_id: Dict[uuid.UUID, Any],
+        passages_by_id: Optional[Dict[uuid.UUID, Any]] = None,
     ) -> ResearchGapCreateDTO:
         """Validates a candidate gap, enforces evidence integrity, and produces a persistable DTO."""
         # 1. Format evidence statements
@@ -68,8 +133,12 @@ class GapValidator:
                 st_type = s.statement_type if hasattr(s, "statement_type") else s["statement_type"]
                 text = s.statement_text if hasattr(s, "statement_text") else s["statement_text"]
                 sec = s.section if hasattr(s, "section") else s.get("section")
+                passage_text = _resolve_passage_text(s, passages_by_id=passages_by_id)
+
                 evidence_lines.append(
-                    f"- [ID: {s_id} | Paper: {p_id} | Type: {st_type} | Section: {sec or 'N/A'}] {text}"
+                    f"- [ID: {s_id} | Paper: {p_id} | Type: {st_type} | Section: {sec or 'N/A'}]\n"
+                    f"  Statement: \"{text}\"\n"
+                    f"  Original Source Passage: {passage_text}"
                 )
 
         if not evidence_lines:
@@ -127,23 +196,60 @@ class GapValidator:
                 if parsed_id in valid_evidence_pool:
                     if parsed_id not in verified_stmt_ids:
                         verified_stmt_ids.append(parsed_id)
+                else:
+                    logger.warning(
+                        f"GapValidator: Cited statement ID {parsed_id} not in candidate evidence pool."
+                    )
             except ValueError:
+                logger.warning(
+                    f"GapValidator: Unparseable statement ID cited: {raw_id!r}"
+                )
                 continue
 
-        # If LLM didn't cite specific IDs or cited invalid ones, retain all candidate pool if verdict was VALID
-        if not verified_stmt_ids and val_result.verdict == ValidationVerdict.VALID:
-            verified_stmt_ids = list(valid_evidence_pool)
+        rejection_reason_code = None
+        if val_result.verdict == ValidationVerdict.VALID:
+            if not val_result.supporting_evidence_statement_ids:
+                rejection_reason_code = "EMPTY_EVIDENCE_CITATIONS"
+                reasoning = (
+                    "Candidate rejected: Model returned VALID verdict but provided no evidence statement citations."
+                )
+                logger.warning(
+                    f"Candidate gap rejected: Model verdict was VALID for gap '{candidate.gap_statement[:80]}' "
+                    f"but provided an empty list of evidence statement IDs."
+                )
+            elif not verified_stmt_ids:
+                rejection_reason_code = "INVALID_OR_FABRICATED_CITATIONS"
+                reasoning = (
+                    "Candidate rejected: Model returned VALID verdict but none of the cited statement IDs "
+                    "could be verified in the candidate evidence pool."
+                )
+                logger.warning(
+                    f"Candidate gap rejected: Model verdict was VALID for gap '{candidate.gap_statement[:80]}' "
+                    f"but cited statement IDs ({val_result.supporting_evidence_statement_ids}) "
+                    f"could not be verified in candidate evidence pool ({list(valid_evidence_pool)})."
+                )
+            elif len(verified_stmt_ids) < self.min_valid_evidence:
+                rejection_reason_code = "INSUFFICIENT_EVIDENCE_COUNT"
+                reasoning = (
+                    f"Candidate rejected: Verified evidence count ({len(verified_stmt_ids)}) "
+                    f"is below minimum required ({self.min_valid_evidence})."
+                )
+                logger.warning(
+                    f"Candidate gap rejected: Model verdict was VALID for gap '{candidate.gap_statement[:80]}' "
+                    f"but verified evidence count ({len(verified_stmt_ids)}) is below minimum ({self.min_valid_evidence})."
+                )
+            else:
+                reasoning = val_result.reasoning
+        else:
+            # Model explicitly rejected the candidate
+            reasoning = val_result.reasoning
 
-        # Check evidence count integrity
         is_supported = (
             val_result.verdict == ValidationVerdict.VALID
             and len(verified_stmt_ids) >= self.min_valid_evidence
         )
 
         status = GapStatus.VALIDATED if is_supported else GapStatus.REJECTED
-        reasoning = val_result.reasoning
-        if val_result.verdict == ValidationVerdict.VALID and not is_supported:
-            reasoning = "Model voted VALID but cited statements could not be verified in candidate evidence pool."
 
         # Build verified paper list and evidence items
         verified_paper_ids: Set[uuid.UUID] = set()
@@ -169,6 +275,13 @@ class GapValidator:
                 )
             )
 
+        metadata = {
+            "signals": candidate.signals,
+            "model_verdict": val_result.verdict.value,
+        }
+        if rejection_reason_code:
+            metadata["rejection_reason"] = rejection_reason_code
+
         return ResearchGapCreateDTO(
             gap_statement=candidate.gap_statement,
             research_problem=candidate.research_problem,
@@ -181,8 +294,5 @@ class GapValidator:
             validation_reasoning=reasoning,
             validation_confidence=val_result.confidence,
             evidence_items=evidence_items,
-            metadata={
-                "signals": candidate.signals,
-                "model_verdict": val_result.verdict.value,
-            },
+            metadata=metadata,
         )

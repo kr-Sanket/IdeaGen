@@ -106,8 +106,10 @@ class StubValidationProvider(LLMProvider):
         self.verdict = verdict
         self.reasoning = reasoning
         self.cited_ids = cited_ids or []
+        self.last_prompt = None
 
     def generate_structured(self, prompt: str, response_schema):
+        self.last_prompt = prompt
         return response_schema(
             verdict=self.verdict,
             reasoning=self.reasoning,
@@ -354,9 +356,308 @@ def test_evidence_integrity_rejects_hallucinated_statement_ids():
     validator = GapValidator(provider=fake_provider, min_valid_evidence=1)
     res = validator.validate_candidate(candidate, statements_by_id)
 
-    # Must retain verified statements or reject if fake ID was provided
-    # Verified statements from candidate pool should not contain the fake_id
+    # Must fail closed: rejected, empty supporting statements, fake ID rejected
+    assert res.status == GapStatus.REJECTED
     assert fake_id not in res.supporting_statement_ids
+    assert res.supporting_statement_ids == []
+    assert res.evidence_count == 0
+    assert res.metadata.get("rejection_reason") == "INVALID_OR_FABRICATED_CITATIONS"
+
+
+def test_validator_includes_original_passage_when_available():
+    """Requirement 1: Original passage text is included in validator evidence block when available."""
+    s1_id = uuid.uuid4()
+    pass_id = uuid.uuid4()
+    p1 = uuid.uuid4()
+
+    passage_text = "Detailed empirical findings show distractor documents degrade precision from 85% to 22%."
+    statements_by_id = {
+        s1_id: {
+            "id": s1_id,
+            "paper_id": p1,
+            "passage_id": pass_id,
+            "statement_type": "LIMITATION",
+            "statement_text": "Distractors cause severe degradation.",
+            "section": "Experiments",
+        }
+    }
+    passages_by_id = {
+        pass_id: {
+            "id": pass_id,
+            "paper_id": p1,
+            "text": passage_text,
+        }
+    }
+
+    candidate = GapCandidate(
+        gap_statement="Distractor sensitivity in RAG.",
+        research_problem="Robustness under distraction.",
+        why_existing_work_insufficient="Prior methods fail on noisy inputs.",
+        supporting_statement_ids=[s1_id],
+        supporting_paper_ids=[p1],
+        relevant_limitations=["Distractors cause severe degradation."],
+        relevant_future_work=[],
+    )
+
+    provider = StubValidationProvider(
+        verdict=ValidationVerdict.VALID,
+        reasoning="Passage confirms empirical degradation.",
+        cited_ids=[str(s1_id)],
+    )
+
+    validator = GapValidator(provider=provider, min_valid_evidence=1)
+    res = validator.validate_candidate(candidate, statements_by_id, passages_by_id=passages_by_id)
+
+    assert res.status == GapStatus.VALIDATED
+    assert provider.last_prompt is not None
+    # Verify original passage text is present in the prompt evidence block
+    assert passage_text in provider.last_prompt
+    assert str(s1_id) in provider.last_prompt
+    assert str(p1) in provider.last_prompt
+    assert "Distractors cause severe degradation." in provider.last_prompt
+    assert "Section: Experiments" in provider.last_prompt
+
+
+def test_validator_handles_missing_or_unlinked_passage_explicitly():
+    """Requirement 2: Missing or unlinked passage references are marked unavailable explicitly."""
+    s1_id = uuid.uuid4()
+    s2_id = uuid.uuid4()
+    missing_pass_id = uuid.uuid4()
+    p1 = uuid.uuid4()
+
+    statements_by_id = {
+        s1_id: {
+            "id": s1_id,
+            "paper_id": p1,
+            "passage_id": None,  # Explicitly unlinked
+            "statement_type": "LIMITATION",
+            "statement_text": "Unlinked limitation.",
+        },
+        s2_id: {
+            "id": s2_id,
+            "paper_id": p1,
+            "passage_id": missing_pass_id,  # Linked to ID not in passage map
+            "statement_type": "LIMITATION",
+            "statement_text": "Missing passage reference statement.",
+        },
+    }
+
+    candidate = GapCandidate(
+        gap_statement="Missing passage test gap.",
+        research_problem="Robustness evaluation.",
+        why_existing_work_insufficient="Insufficient.",
+        supporting_statement_ids=[s1_id, s2_id],
+        supporting_paper_ids=[p1],
+        relevant_limitations=["Unlinked limitation."],
+        relevant_future_work=[],
+    )
+
+    provider = StubValidationProvider(
+        verdict=ValidationVerdict.VALID,
+        reasoning="Valid verdict test.",
+        cited_ids=[str(s1_id), str(s2_id)],
+    )
+
+    validator = GapValidator(provider=provider, min_valid_evidence=1)
+    # passages_by_id is empty, so s1 has no passage_id and s2 has missing passage
+    res = validator.validate_candidate(candidate, statements_by_id, passages_by_id={})
+
+    assert provider.last_prompt is not None
+    assert "[Source passage unavailable - no linked passage]" in provider.last_prompt
+    assert "[Source passage unavailable - passage not found in database]" in provider.last_prompt
+
+
+def test_validator_rejects_valid_verdict_with_empty_citations():
+    """Requirement 3: A VALID verdict with an empty evidence-ID list is not accepted (fails closed)."""
+    s1_id = uuid.uuid4()
+    p1 = uuid.uuid4()
+
+    statements_by_id = {
+        s1_id: {"id": s1_id, "paper_id": p1, "statement_type": "LIMITATION", "statement_text": "Limitation."}
+    }
+
+    candidate = GapCandidate(
+        gap_statement="Unaddressed gap.",
+        research_problem="Problem.",
+        why_existing_work_insufficient="Insufficient.",
+        supporting_statement_ids=[s1_id],
+        supporting_paper_ids=[p1],
+        relevant_limitations=["Limitation."],
+        relevant_future_work=[],
+    )
+
+    provider = StubValidationProvider(
+        verdict=ValidationVerdict.VALID,
+        reasoning="Model asserts valid without citing any evidence ID.",
+        cited_ids=[],  # Empty citations
+    )
+
+    validator = GapValidator(provider=provider, min_valid_evidence=1)
+    res = validator.validate_candidate(candidate, statements_by_id)
+
+    # Must NOT adopt candidate pool; must fail closed and reject
+    assert res.status == GapStatus.REJECTED
+    assert res.supporting_statement_ids == []
+    assert res.evidence_count == 0
+    assert res.metadata.get("rejection_reason") == "EMPTY_EVIDENCE_CITATIONS"
+    assert "no evidence statement citations" in res.validation_reasoning
+
+
+def test_validator_rejects_valid_verdict_with_fabricated_ids():
+    """Requirement 4: A VALID verdict with fabricated IDs is not accepted."""
+    s1_id = uuid.uuid4()
+    p1 = uuid.uuid4()
+
+    statements_by_id = {
+        s1_id: {"id": s1_id, "paper_id": p1, "statement_type": "LIMITATION", "statement_text": "Real statement."}
+    }
+
+    candidate = GapCandidate(
+        gap_statement="Unaddressed gap.",
+        research_problem="Problem.",
+        why_existing_work_insufficient="Insufficient.",
+        supporting_statement_ids=[s1_id],
+        supporting_paper_ids=[p1],
+        relevant_limitations=["Real statement."],
+        relevant_future_work=[],
+    )
+
+    provider = StubValidationProvider(
+        verdict=ValidationVerdict.VALID,
+        reasoning="Fabricated IDs cited.",
+        cited_ids=[str(uuid.uuid4()), "not-a-valid-uuid", str(uuid.uuid4())],
+    )
+
+    validator = GapValidator(provider=provider, min_valid_evidence=1)
+    res = validator.validate_candidate(candidate, statements_by_id)
+
+    assert res.status == GapStatus.REJECTED
+    assert res.supporting_statement_ids == []
+    assert res.evidence_count == 0
+    assert res.metadata.get("rejection_reason") == "INVALID_OR_FABRICATED_CITATIONS"
+
+
+def test_validator_rejects_ids_outside_candidate_evidence_pool():
+    """Requirement 5: IDs belonging to statements outside candidate evidence pool are rejected."""
+    s1_id = uuid.uuid4()
+    s2_id = uuid.uuid4()  # In DB, but NOT in this candidate's pool
+    p1 = uuid.uuid4()
+
+    statements_by_id = {
+        s1_id: {"id": s1_id, "paper_id": p1, "statement_type": "LIMITATION", "statement_text": "Candidate limitation."},
+        s2_id: {"id": s2_id, "paper_id": p1, "statement_type": "LIMITATION", "statement_text": "Unrelated limitation."},
+    }
+
+    candidate = GapCandidate(
+        gap_statement="Candidate gap statement.",
+        research_problem="Problem.",
+        why_existing_work_insufficient="Insufficient.",
+        supporting_statement_ids=[s1_id],  # ONLY s1 is in candidate pool
+        supporting_paper_ids=[p1],
+        relevant_limitations=["Candidate limitation."],
+        relevant_future_work=[],
+    )
+
+    # Case A: Model cites ONLY the external statement ID s2
+    provider_external_only = StubValidationProvider(
+        verdict=ValidationVerdict.VALID,
+        reasoning="Cites statement outside candidate pool.",
+        cited_ids=[str(s2_id)],
+    )
+
+    validator = GapValidator(provider=provider_external_only, min_valid_evidence=1)
+    res_external = validator.validate_candidate(candidate, statements_by_id)
+
+    assert res_external.status == GapStatus.REJECTED
+    assert res_external.supporting_statement_ids == []
+    assert s2_id not in res_external.supporting_statement_ids
+    assert res_external.metadata.get("rejection_reason") == "INVALID_OR_FABRICATED_CITATIONS"
+
+    # Case B: Model cites BOTH valid candidate ID (s1) and external ID (s2)
+    provider_mixed = StubValidationProvider(
+        verdict=ValidationVerdict.VALID,
+        reasoning="Cites mixed IDs.",
+        cited_ids=[str(s1_id), str(s2_id)],
+    )
+
+    validator_mixed = GapValidator(provider=provider_mixed, min_valid_evidence=1)
+    res_mixed = validator_mixed.validate_candidate(candidate, statements_by_id)
+
+    assert res_mixed.status == GapStatus.VALIDATED
+    assert res_mixed.supporting_statement_ids == [s1_id]
+    assert s2_id not in res_mixed.supporting_statement_ids
+    assert res_mixed.evidence_count == 1
+
+
+def test_validator_accepts_valid_verdict_with_valid_candidate_ids():
+    """Requirement 6: A VALID verdict with valid candidate-associated IDs can still pass."""
+    s1_id = uuid.uuid4()
+    s2_id = uuid.uuid4()
+    p1 = uuid.uuid4()
+    p2 = uuid.uuid4()
+
+    statements_by_id = {
+        s1_id: {"id": s1_id, "paper_id": p1, "statement_type": "LIMITATION", "statement_text": "Limitation 1.", "section": "Limitations"},
+        s2_id: {"id": s2_id, "paper_id": p2, "statement_type": "LIMITATION", "statement_text": "Limitation 2.", "section": "Discussion"},
+    }
+
+    candidate = GapCandidate(
+        gap_statement="Valid recurring limitation.",
+        research_problem="Problem.",
+        why_existing_work_insufficient="Insufficient.",
+        supporting_statement_ids=[s1_id, s2_id],
+        supporting_paper_ids=[p1, p2],
+        relevant_limitations=["Limitation 1.", "Limitation 2."],
+        relevant_future_work=[],
+    )
+
+    provider = StubValidationProvider(
+        verdict=ValidationVerdict.VALID,
+        reasoning="Both empirical limitations substantiate the candidate gap.",
+        cited_ids=[str(s1_id), str(s2_id)],
+    )
+
+    validator = GapValidator(provider=provider, min_valid_evidence=1)
+    res = validator.validate_candidate(candidate, statements_by_id)
+
+    assert res.status == GapStatus.VALIDATED
+    assert set(res.supporting_statement_ids) == {s1_id, s2_id}
+    assert res.evidence_count == 2
+    assert len(res.evidence_items) == 2
+    assert res.validation_reasoning == "Both empirical limitations substantiate the candidate gap."
+
+
+def test_validator_preserves_explicit_rejection_behavior():
+    """Requirement 7: Explicit model rejection behavior remains intact."""
+    s1_id = uuid.uuid4()
+    p1 = uuid.uuid4()
+
+    statements_by_id = {
+        s1_id: {"id": s1_id, "paper_id": p1, "statement_type": "LIMITATION", "statement_text": "Solvable constraint."}
+    }
+
+    candidate = GapCandidate(
+        gap_statement="Purported gap.",
+        research_problem="Problem.",
+        why_existing_work_insufficient="Insufficient.",
+        supporting_statement_ids=[s1_id],
+        supporting_paper_ids=[p1],
+        relevant_limitations=["Solvable constraint."],
+        relevant_future_work=[],
+    )
+
+    provider = StubValidationProvider(
+        verdict=ValidationVerdict.REJECT,
+        reasoning="Candidate is trivial and already addressed by existing literature.",
+        cited_ids=[str(s1_id)],
+    )
+
+    validator = GapValidator(provider=provider, min_valid_evidence=1)
+    res = validator.validate_candidate(candidate, statements_by_id)
+
+    assert res.status == GapStatus.REJECTED
+    assert res.validation_reasoning == "Candidate is trivial and already addressed by existing literature."
+    assert res.metadata.get("model_verdict") == "REJECT"
 
 
 def test_gap_persistence_and_evidence_relationships(session):
@@ -450,3 +751,167 @@ def test_gap_persistence_and_evidence_relationships(session):
     assert evidence_records[0].statement_id == statement.id
     assert evidence_records[0].paper_id == paper_id
     assert evidence_records[0].evidence_role == "LIMITATION"
+
+
+# ============================================================================
+# Phase 1 Candidate Generation Quality Regression Tests
+# ============================================================================
+
+
+def test_pattern_analyzer_assumption_alone_produces_no_limitation_candidate():
+    """Requirement 1: An ASSUMPTION statement alone produces no limitation candidate."""
+    analyzer = ResearchPatternAnalyzer(min_supporting_evidence=1)
+    s_id = uuid.uuid4()
+    p_id = uuid.uuid4()
+
+    statements = [
+        {
+            "id": s_id,
+            "paper_id": p_id,
+            "statement_type": "ASSUMPTION",
+            "statement_text": "We assume that Wikipedia passages contain all necessary factual knowledge.",
+        }
+    ]
+
+    cluster = SemanticCluster(
+        cluster_id=0,
+        statements=statements,
+        paper_ids={p_id},
+        centroid=np.ones(10, dtype=np.float32),
+        statement_type_counts={"ASSUMPTION": 1},
+    )
+
+    candidates = analyzer.analyze_clusters([cluster])
+    assert len(candidates) == 0
+
+
+def test_pattern_analyzer_positive_sufficiency_statement_not_a_limitation():
+    """Requirement 2: A positive sufficiency statement does not become a limitation candidate."""
+    analyzer = ResearchPatternAnalyzer(min_supporting_evidence=1)
+    s_id = uuid.uuid4()
+    p_id = uuid.uuid4()
+
+    statements = [
+        {
+            "id": s_id,
+            "paper_id": p_id,
+            "statement_type": "LIMITATION",  # Even if misclassified by upstream extractor
+            "statement_text": "Fine-tuning the query encoder BERTq and BART generator is sufficient for strong performance.",
+        }
+    ]
+
+    cluster = SemanticCluster(
+        cluster_id=0,
+        statements=statements,
+        paper_ids={p_id},
+        centroid=np.ones(10, dtype=np.float32),
+        statement_type_counts={"LIMITATION": 1},
+    )
+
+    candidates = analyzer.analyze_clusters([cluster])
+    assert len(candidates) == 0
+
+
+def test_pattern_analyzer_feasibility_statement_not_a_limitation():
+    """Requirement 3: A feasibility statement about adapting a model does not become a limitation."""
+    analyzer = ResearchPatternAnalyzer(min_supporting_evidence=1)
+    s_id = uuid.uuid4()
+    p_id = uuid.uuid4()
+
+    statements = [
+        {
+            "id": s_id,
+            "paper_id": p_id,
+            "statement_type": "LIMITATION",  # Even if misclassified as limitation
+            "statement_text": "RAG models can be adapted for sequence classification by treating the target class as a single-token sequence.",
+        }
+    ]
+
+    cluster = SemanticCluster(
+        cluster_id=0,
+        statements=statements,
+        paper_ids={p_id},
+        centroid=np.ones(10, dtype=np.float32),
+        statement_type_counts={"LIMITATION": 1},
+    )
+
+    candidates = analyzer.analyze_clusters([cluster])
+    assert len(candidates) == 0
+
+
+def test_pattern_analyzer_explicit_limitation_produces_eligible_candidate():
+    """Requirement 4: A genuine explicit limitation still produces an eligible candidate."""
+    analyzer = ResearchPatternAnalyzer(min_supporting_evidence=1)
+    s_id = uuid.uuid4()
+    p_id = uuid.uuid4()
+
+    statements = [
+        {
+            "id": s_id,
+            "paper_id": p_id,
+            "statement_type": "LIMITATION",
+            "statement_text": "Current graph traversal introduces significant latency and inference overhead.",
+        }
+    ]
+
+    cluster = SemanticCluster(
+        cluster_id=0,
+        statements=statements,
+        paper_ids={p_id},
+        centroid=np.ones(10, dtype=np.float32),
+        statement_type_counts={"LIMITATION": 1},
+    )
+
+    candidates = analyzer.analyze_clusters([cluster])
+    assert len(candidates) == 1
+
+    gap = candidates[0]
+    # Single-paper limitation must not claim to be "recurring across methodologies"
+    assert gap.signals["pattern_type"] == "DOCUMENTED_LIMITATION"
+    assert "Documented scientific limitation" in gap.gap_statement
+    assert "Significant latency and inference overhead" in gap.gap_statement or "Current graph traversal" in gap.gap_statement
+
+
+def test_pattern_analyzer_single_vs_multi_paper_corroboration():
+    """Requirement 5: Multi-paper corroboration yields RECURRING_LIMITATIONS while single-paper yields DOCUMENTED_LIMITATION."""
+    analyzer = ResearchPatternAnalyzer(min_supporting_evidence=1)
+    s1_id = uuid.uuid4()
+    s2_id = uuid.uuid4()
+    p1 = uuid.uuid4()
+    p2 = uuid.uuid4()
+
+    statements = [
+        {
+            "id": s1_id,
+            "paper_id": p1,
+            "statement_type": "LIMITATION",
+            "statement_text": "Context pruning fails to filter distractor passages in complex QA.",
+        },
+        {
+            "id": s2_id,
+            "paper_id": p2,
+            "statement_type": "LIMITATION",
+            "statement_text": "Irrelevant documents cause severe hallucination degradation in generation.",
+        },
+    ]
+
+    cluster = SemanticCluster(
+        cluster_id=0,
+        statements=statements,
+        paper_ids={p1, p2},
+        centroid=np.ones(10, dtype=np.float32),
+        statement_type_counts={"LIMITATION": 2},
+    )
+
+    candidates = analyzer.analyze_clusters([cluster])
+    assert len(candidates) == 1
+
+    gap = candidates[0]
+    # With distinct papers, recurring pattern is valid
+    assert gap.signals["pattern_type"] == "RECURRING_LIMITATIONS"
+    assert "Persistent scientific limitation across current methodologies" in gap.gap_statement
+    assert s1_id in gap.supporting_statement_ids
+    assert s2_id in gap.supporting_statement_ids
+    assert p1 in gap.supporting_paper_ids
+    assert p2 in gap.supporting_paper_ids
+
