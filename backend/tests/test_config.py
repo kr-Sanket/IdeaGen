@@ -51,7 +51,7 @@ class TestSettingsDefaults:
         assert settings.ollama_model == "qwen3:8b"
         assert settings.ollama_embedding_model == "nomic-embed-text"
         assert settings.ollama_embedding_dimension == 768
-        assert settings.ollama_timeout == 120.0
+        assert settings.ollama_timeout == 300.0
         assert settings.ollama_num_ctx == 8192
 
 

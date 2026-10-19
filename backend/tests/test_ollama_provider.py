@@ -36,7 +36,7 @@ def test_ollama_provider_defaults():
     provider = OllamaLLMProvider()
     assert provider.base_url == "http://localhost:11434"
     assert provider.model_name == "qwen3:8b"
-    assert provider.timeout == 120.0
+    assert provider.timeout == 300.0
     assert provider.num_ctx == 8192
 
 

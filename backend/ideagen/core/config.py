@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     ollama_model: str = Field(default="qwen3:8b", validation_alias=AliasChoices("IDEAGEN_OLLAMA_MODEL", "OLLAMA_MODEL"))
     ollama_embedding_model: str = Field(default="nomic-embed-text", validation_alias=AliasChoices("IDEAGEN_OLLAMA_EMBEDDING_MODEL", "OLLAMA_EMBEDDING_MODEL"))
     ollama_embedding_dimension: int = Field(default=768, validation_alias=AliasChoices("IDEAGEN_OLLAMA_EMBEDDING_DIMENSION", "OLLAMA_EMBEDDING_DIMENSION"))
-    ollama_timeout: float = Field(default=120.0, validation_alias=AliasChoices("IDEAGEN_OLLAMA_TIMEOUT", "OLLAMA_TIMEOUT"))
+    ollama_timeout: float = Field(default=300.0, validation_alias=AliasChoices("IDEAGEN_OLLAMA_TIMEOUT", "OLLAMA_TIMEOUT"))
     ollama_num_ctx: int = Field(default=8192, validation_alias=AliasChoices("IDEAGEN_OLLAMA_NUM_CTX", "OLLAMA_NUM_CTX"))
 
     # ── Gemini (Preserved) ────────────────────────────────────────────
