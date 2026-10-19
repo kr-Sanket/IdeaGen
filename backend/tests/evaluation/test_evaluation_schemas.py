@@ -25,5 +25,8 @@ def test_evaluation_results_are_serializable():
 def test_baselines_definition():
     baselines = get_baselines()
     assert len(baselines) == 4
+    tfidf_baseline = next(b for b in baselines if b.name == "TF-IDF Discovery")
+    assert tfidf_baseline.is_implemented is True
     for b in baselines:
-        assert b.is_implemented is False
+        if b.name != "TF-IDF Discovery":
+            assert b.is_implemented is False
