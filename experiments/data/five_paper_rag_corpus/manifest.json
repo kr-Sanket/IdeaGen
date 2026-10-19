@@ -1,0 +1,75 @@
+[
+  {
+    "filename": "lewis2020_rag.pdf",
+    "title": "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
+    "publication_date": "2020-05-22",
+    "doi": "10.48550/arXiv.2005.11401",
+    "authors": [
+      {"name": "Patrick Lewis"},
+      {"name": "Ethan Perez"},
+      {"name": "Aleksandra Piktus"},
+      {"name": "Fabio Petroni"},
+      {"name": "Vladimir Karpukhin"},
+      {"name": "Naman Goyal"},
+      {"name": "Heinrich Küttler"},
+      {"name": "Mike Lewis"},
+      {"name": "Wen-tau Yih"},
+      {"name": "Tim Rocktäschel"},
+      {"name": "Sebastian Riedel"},
+      {"name": "Douwe Kiela"}
+    ]
+  },
+  {
+    "filename": "shi2023_distracted_context.pdf",
+    "title": "Large Language Models Can Be Easily Distracted by Irrelevant Context",
+    "publication_date": "2023-01-31",
+    "doi": "10.48550/arXiv.2302.00093",
+    "authors": [
+      {"name": "Freda Shi"},
+      {"name": "Xinyun Chen"},
+      {"name": "Kanishka Misra"},
+      {"name": "Nathan Scales"},
+      {"name": "David Dohan"},
+      {"name": "Ed Chi"},
+      {"name": "Nathanael Schärli"},
+      {"name": "Denny Zhou"}
+    ]
+  },
+  {
+    "filename": "gao2023_citations_alce.pdf",
+    "title": "Enabling Large Language Models to Generate Text with Citations",
+    "publication_date": "2023-05-24",
+    "doi": "10.18653/v1/2023.emnlp-main.398",
+    "authors": [
+      {"name": "Tianyu Gao"},
+      {"name": "Howard Yen"},
+      {"name": "Jiatong Yu"},
+      {"name": "Danqi Chen"}
+    ]
+  },
+  {
+    "filename": "asai2023_self_rag.pdf",
+    "title": "Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection",
+    "publication_date": "2023-10-17",
+    "doi": "10.48550/arXiv.2310.11511",
+    "authors": [
+      {"name": "Akari Asai"},
+      {"name": "Zeqiu Wu"},
+      {"name": "Yizhong Wang"},
+      {"name": "Avirup Sil"},
+      {"name": "Hannaneh Hajishirzi"}
+    ]
+  },
+  {
+    "filename": "yoran2023_robust_ralm.pdf",
+    "title": "Making Retrieval-Augmented Language Models Robust to Irrelevant Context",
+    "publication_date": "2023-10-02",
+    "doi": "10.48550/arXiv.2310.01558",
+    "authors": [
+      {"name": "Ori Yoran"},
+      {"name": "Tomer Wolfson"},
+      {"name": "Ori Ram"},
+      {"name": "Jonathan Berant"}
+    ]
+  }
+]
