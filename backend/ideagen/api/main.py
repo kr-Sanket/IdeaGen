@@ -10,7 +10,7 @@ from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
-from sqlalchemy import text, func, select
+from sqlalchemy import text, func
 import json
 import logging
 import uuid
@@ -24,12 +24,10 @@ logger = logging.getLogger(__name__)
 from ideagen.db import (
     get_db,
     Paper,
-    PaperDocument,
     PaperPassage,
     ResearchKnowledge,
     ResearchStatement,
     ResearchGap,
-    GapEvidence,
     Opportunity,
     OpportunityEvidence,
     OpportunityHistory,
@@ -81,7 +79,7 @@ from ideagen.discovery.embeddings import get_default_embedding_provider
 from ideagen.llm import get_default_llm_provider
 from ideagen.opportunity.classifier import RelationshipClassifier
 from ideagen.generation.pipeline import ResearchOpportunityPipeline
-from ideagen.generation.models import ResearchOpportunityInputDTO, OpportunityStatus
+from ideagen.generation.models import ResearchOpportunityInputDTO
 from ideagen.reporting.report_service import OpportunityReportService
 
 app = FastAPI(title="IdeaGen API", version="1.0.0")
