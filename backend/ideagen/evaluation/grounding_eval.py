@@ -1,4 +1,4 @@
-from ideagen.evaluation.schemas import EvaluationResult
+from ideagen.evaluation.schemas import EvaluationResult, EvaluationType
 
 def evaluate_grounding_engineering() -> EvaluationResult:
     """
@@ -8,6 +8,7 @@ def evaluate_grounding_engineering() -> EvaluationResult:
     return EvaluationResult(
         evaluation_name="grounding_controlled_fixture",
         fixture_version="phase_7_v1",
+        evaluation_type=EvaluationType.FIXTURE,
         model_provider="FakeExplanationGenerator",
         parameters={"strict_mode": True},
         metrics={"citation_validity_rate": 1.0, "fabrication_rejection_rate": 1.0},
