@@ -1,5 +1,4 @@
 from ideagen.evaluation.schemas import EvaluationResult, EvaluationType
-from ideagen.evaluation.metrics import precision_score, recall_score, f1_score
 
 def evaluate_discovery_engineering() -> EvaluationResult:
     """
