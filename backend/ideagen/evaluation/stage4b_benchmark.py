@@ -11,19 +11,16 @@ Expanded 25-case evaluation benchmark addressing the Stage 4 credibility audit:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence
-import uuid
 
 from ideagen.opportunity.models import OpportunityRelationship, OpportunityStatus
 from ideagen.opportunity.grounding import (
-    is_excerpt_grounded,
     validate_evidence_grounding,
     UngroundedEvidenceError,
     DEFAULT_GROUNDING_THRESHOLD,
 )
-from ideagen.opportunity.state_machine import transition
 from ideagen.evaluation.metrics import precision_score, recall_score, f1_score
 
 

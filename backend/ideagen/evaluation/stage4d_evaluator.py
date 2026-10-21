@@ -12,7 +12,7 @@ Provides an independent evaluation runner that:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 import time
@@ -23,14 +23,11 @@ from ideagen.opportunity.models import OpportunityRelationship
 from ideagen.opportunity.classifier import (
     RelationshipClassifier,
     RelationshipClassificationInput,
-    RelationshipClassification,
     RELATIONSHIP_CLASSIFIER_PROMPT_VERSION,
 )
 from ideagen.llm.exceptions import (
     ProviderFailureError,
     MalformedResponseError,
-    MissingInputError,
-    LLMError,
 )
 from ideagen.evaluation.stage4b_benchmark import (
     Stage4bBenchmarkCase,

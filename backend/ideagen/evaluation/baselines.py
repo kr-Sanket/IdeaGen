@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 import logging
 import re
-from typing import Any, Collection, Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 from pydantic import BaseModel
