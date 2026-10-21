@@ -127,6 +127,7 @@ class IncrementalOpportunityEvolutionService:
         integration: OpportunityClassificationIntegration,
         session: Optional[Session] = None,
         max_candidates: Optional[int] = None,
+        candidate_ranker: Optional[Any] = None,
     ) -> None:
         """Initializes the incremental opportunity evolution service.
 
@@ -134,10 +135,21 @@ class IncrementalOpportunityEvolutionService:
             integration: Existing OpportunityClassificationIntegration instance.
             session: Optional SQLAlchemy session. Can also be supplied per invocation.
             max_candidates: Optional default cap on candidate opportunities evaluated per paper.
+            candidate_ranker: Optional CandidateRanker instance or strategy string ("tfidf" or "fifo").
         """
         self.integration = integration
         self.session = session
         self.max_candidates = max_candidates
+
+        from ideagen.opportunity.ranking import CandidateRanker, get_candidate_ranker
+        if candidate_ranker is None:
+            from ideagen.core.config import get_settings
+            strategy = getattr(get_settings(), "candidate_ranking_strategy", "tfidf")
+            self.candidate_ranker: CandidateRanker = get_candidate_ranker(strategy)
+        elif isinstance(candidate_ranker, str):
+            self.candidate_ranker = get_candidate_ranker(candidate_ranker)
+        else:
+            self.candidate_ranker = candidate_ranker
 
     def evaluate_paper(
         self,
@@ -267,13 +279,20 @@ class IncrementalOpportunityEvolutionService:
         query = query.order_by(Opportunity.created_at.asc(), Opportunity.id.asc())
         all_candidates = db.execute(query).scalars().all()
 
-        # Deterministic chronological sort resolving effective creation dates
-        sorted_candidates = sorted(
-            all_candidates,
-            key=lambda o: (
-                get_opportunity_effective_creation_date(o) or datetime.date.min,
-                str(o.id),
-            ),
+        # Build query text for candidate ranking (title + abstract, fallback to passages)
+        query_text = (paper.title or "").strip()
+        if paper.abstract and paper.abstract.strip():
+            query_text = f"{query_text} {paper.abstract.strip()}".strip()
+        elif stored_passages:
+            passage_text = " ".join(p.text for p in stored_passages if p.text and p.text.strip())
+            if passage_text:
+                query_text = f"{query_text} {passage_text}".strip()
+
+        # Rank candidates using configured candidate ranker (TF-IDF relevance with FIFO tie-break)
+        sorted_candidates = self.candidate_ranker.rank(
+            query_text=query_text,
+            candidates=all_candidates,
+            max_candidates=None,
         )
 
         # The cap bounds classifier calls, so it is applied to candidates that pass every

@@ -77,6 +77,14 @@ class Settings(BaseSettings):
             "POST_INGESTION_EVOLUTION_MAX_CANDIDATES",
         ),
     )
+    # Strategy for ranking candidate opportunities during incremental evolution ("tfidf" or "fifo").
+    candidate_ranking_strategy: str = Field(
+        default="tfidf",
+        validation_alias=AliasChoices(
+            "IDEAGEN_CANDIDATE_RANKING_STRATEGY",
+            "CANDIDATE_RANKING_STRATEGY",
+        ),
+    )
 
     # ── Paths ─────────────────────────────────────────────────────────
     project_root: Path = _PROJECT_ROOT
