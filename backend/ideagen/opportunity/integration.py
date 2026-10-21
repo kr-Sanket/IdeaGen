@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence, Any
 
 from sqlalchemy.orm import Session
 from sqlalchemy import select
@@ -22,6 +22,52 @@ from ideagen.opportunity.classifier import (
 )
 from ideagen.opportunity.models import OpportunityRelationship, OpportunityStatus
 from ideagen.opportunity.service import OpportunityTransitionService
+
+
+DEFAULT_STAGE_5_MAX_PASSAGES: int = 10
+DEFAULT_STAGE_5_MAX_TOTAL_WORDS: int = 2000
+DEFAULT_STAGE_5_MAX_ABSTRACT_CHARS: int = 2000
+
+
+def resolve_paper_abstract(
+    paper: Paper,
+    stored_passages: Sequence[Any] = (),
+    max_abstract_chars: int = DEFAULT_STAGE_5_MAX_ABSTRACT_CHARS,
+) -> str:
+    """Resolve and bound the paper abstract for Stage 5 classifier input.
+
+    Prefers real abstract-section passages from stored_passages if identifiable
+    (ordered deterministically by passage_index). If no abstract-section passages
+    are found, falls back to paper.abstract. In both cases, applies deterministic
+    truncation to max_abstract_chars.
+
+    Args:
+        paper: Target Paper entity.
+        stored_passages: Sequence of PaperPassage objects for the paper.
+        max_abstract_chars: Maximum character budget for the resolved abstract.
+
+    Returns:
+        Deterministic bounded abstract text string.
+    """
+    abstract_text: str = ""
+    if stored_passages:
+        abstract_passages = [
+            p for p in stored_passages
+            if getattr(p, "section", None) and "abstract" in str(p.section).lower()
+        ]
+        if abstract_passages:
+            abstract_passages.sort(key=lambda p: getattr(p, "passage_index", 0))
+            abstract_text = "\n\n".join(
+                p.text.strip() for p in abstract_passages if getattr(p, "text", None) and p.text.strip()
+            )
+
+    if not abstract_text:
+        abstract_text = (getattr(paper, "abstract", "") or "").strip()
+
+    if max_abstract_chars is not None and max_abstract_chars > 0 and len(abstract_text) > max_abstract_chars:
+        abstract_text = abstract_text[:max_abstract_chars].rstrip()
+
+    return abstract_text
 
 
 @dataclass(frozen=True)
@@ -69,10 +115,16 @@ class OpportunityClassificationIntegration:
         classifier: RelationshipClassifier,
         transition_service: OpportunityTransitionService,
         session: Session,
+        max_passages: int = DEFAULT_STAGE_5_MAX_PASSAGES,
+        max_total_words: int = DEFAULT_STAGE_5_MAX_TOTAL_WORDS,
+        max_abstract_chars: int = DEFAULT_STAGE_5_MAX_ABSTRACT_CHARS,
     ) -> None:
         self._classifier = classifier
         self._transition_service = transition_service
         self._session = session
+        self._max_passages = max(1, int(max_passages))
+        self._max_total_words = max(1, int(max_total_words))
+        self._max_abstract_chars = max(1, int(max_abstract_chars))
 
     def classify_and_apply(
         self,
@@ -118,7 +170,11 @@ class OpportunityClassificationIntegration:
 
         # ── 2b. Retrieve bounded stored passages ─────────────────────────
         from ideagen.db.models import PaperPassage
-        from ideagen.opportunity.grounding import validate_evidence_grounding
+        from ideagen.opportunity.grounding import (
+            validate_evidence_grounding,
+            UngroundedEvidenceError,
+            SUBSTANTIVE_RELATIONSHIPS,
+        )
         from ideagen.understanding.passage_selector import PassageSelector
 
         stored_passages = self._session.execute(
@@ -130,7 +186,10 @@ class OpportunityClassificationIntegration:
         passage_context: Optional[str] = None
         if stored_passages:
             # Select bounded set of actual stored passages deterministically
-            selector = PassageSelector(max_passages=10, max_total_words=2000)
+            selector = PassageSelector(
+                max_passages=self._max_passages,
+                max_total_words=self._max_total_words,
+            )
             selected_passages = selector.select_passages(stored_passages)
             passage_lines = []
             for sp in selected_passages:
@@ -143,12 +202,18 @@ class OpportunityClassificationIntegration:
         previous_status = OpportunityStatus(opportunity.status)
 
         # ── 3. Construct bounded classifier input ────────────────────────
+        resolved_abstract = resolve_paper_abstract(
+            paper=paper,
+            stored_passages=stored_passages,
+            max_abstract_chars=self._max_abstract_chars,
+        )
+
         classifier_input = RelationshipClassificationInput(
             opportunity_title=opportunity.title,
             opportunity_problem_statement=opportunity.problem_statement,
             opportunity_description=opportunity.description,
             paper_title=paper.title,
-            paper_abstract=paper.abstract,
+            paper_abstract=resolved_abstract,
             paper_excerpt=passage_context,
         )
 
@@ -156,13 +221,27 @@ class OpportunityClassificationIntegration:
         classification = self._classifier.classify(classifier_input)
 
         # ── 5b. Fail-closed evidence grounding validation ────────────────
-        if stored_passages:
-            validate_evidence_grounding(
-                excerpt=classification.evidence_excerpt,
-                passages=stored_passages,
-                relationship=classification.relationship,
-                paper_id=paper_id,
-            )
+        if classification.relationship in SUBSTANTIVE_RELATIONSHIPS:
+            if stored_passages:
+                validate_evidence_grounding(
+                    excerpt=classification.evidence_excerpt,
+                    passages=stored_passages,
+                    relationship=classification.relationship,
+                    paper_id=paper_id,
+                )
+            else:
+                sources = [paper.abstract] if paper.abstract and paper.abstract.strip() else []
+                if sources:
+                    validate_evidence_grounding(
+                        excerpt=classification.evidence_excerpt,
+                        passages=sources,
+                        relationship=classification.relationship,
+                        paper_id=paper_id,
+                    )
+                else:
+                    raise UngroundedEvidenceError(
+                        f"Evidence excerpt cannot be grounded: paper {paper_id} has neither stored passages nor abstract."
+                    )
 
         # ── 6–7. Delegate transition to existing service ─────────────────
         updated_opportunity = self._transition_service.apply_relationship(

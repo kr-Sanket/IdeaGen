@@ -60,6 +60,22 @@ class ControlledProvider:
             prompt_version="v1"
         )
 
+def _describe_future_paper_outcome(p_future, evolution_results) -> str:
+    """States what actually happened to the latest demo paper, derived from recorded events."""
+    if p_future is None:
+        return "No paper beyond batch b1 in this demonstration corpus."
+    evaluated = any(
+        ev.paper_id == p_future.id for er in evolution_results for ev in er.events
+    )
+    window = "demonstration batch b2 (2025-01-01 to 2025-12-31)"
+    if evaluated:
+        return f"Not excluded by date: this paper falls inside {window} and an evolution event was recorded."
+    return (
+        f"Not excluded by date: this paper falls inside {window}, but no evolution event was "
+        "recorded (for example, its scripted classification was rejected by evidence grounding)."
+    )
+
+
 def build_demo_scenario(custom_raw_papers=None) -> DemoScenarioResponse:
     """Executes the Phase 14 End-to-End Demo scenario on a fresh in-memory database using real data."""
     engine = create_engine("sqlite:///:memory:")
@@ -216,7 +232,7 @@ def build_demo_scenario(custom_raw_papers=None) -> DemoScenarioResponse:
                     "paper_title": f"{len(candidate.supporting_paper_ids)} Baseline Papers",
                     "paper_date": None,
                     "status_change": "None -> OPEN",
-                    "excerpt": "Discovered recurring gap in RAG robustness."
+                    "excerpt": "Demonstration gap constructed from the scripted baseline cluster."
                 }
             ]
         })
@@ -230,7 +246,7 @@ def build_demo_scenario(custom_raw_papers=None) -> DemoScenarioResponse:
                     "paper_title": p_obj.title if p_obj else str(ev.paper_id),
                     "paper_date": p_obj.publication_date if p_obj else None,
                     "status_change": f"{ev.previous_status.value} -> {ev.new_status.value}",
-                    "excerpt": "Matched by Real-Data classifier"
+                    "excerpt": "Scripted demonstration classification (not model output)"
                 })
             
             if batch_events:
@@ -265,7 +281,7 @@ def build_demo_scenario(custom_raw_papers=None) -> DemoScenarioResponse:
             leakage_protection={
                 "future_paper": p_future.title if p_future else "None",
                 "future_date": p_future.publication_date if p_future else None,
-                "result": "Excluded by cutoff date."
+                "result": _describe_future_paper_outcome(p_future, evolution_results),
             }
         )
 

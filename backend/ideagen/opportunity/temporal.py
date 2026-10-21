@@ -129,6 +129,16 @@ class OpportunityEvolutionService:
                         f"Status transition discarded."
                     )
                     continue
+                except ValueError as val_err:
+                    if "already exists" in str(val_err):
+                        savepoint.rollback()
+                        skipped += 1
+                        logger.info(
+                            f"Skipping paper {p.id}: evidence already recorded for opportunity {opportunity_id}."
+                        )
+                        continue
+                    savepoint.rollback()
+                    raise
                 except Exception as e:
                     savepoint.rollback()
                     raise e
@@ -167,11 +177,36 @@ class OpportunityEvolutionService:
         db: Session,
         opportunity_id: uuid.UUID,
         batches: List[TemporalBatch],
-        papers: List[Paper]
+        papers: List[Paper],
+        isolated: bool = False,
     ) -> List[OpportunityEvolutionResult]:
-        """Replay processing over multiple sequential batches."""
+        """Replay processing over multiple sequential batches.
+
+        Args:
+            db: SQLAlchemy session.
+            opportunity_id: UUID of the opportunity to evolve.
+            batches: Sequential temporal batches to evaluate.
+            papers: Candidate papers to process across batches.
+            isolated: When True, executes the entire replay within an isolated
+                savepoint (nested transaction) that is rolled back upon completion.
+                This ensures deterministic, reproducible replay runs without mutating
+                live opportunity status, altering production history, or deleting data.
+                When False (default), persists each batch's state transitions to the session.
+        """
         # Ensure chronological batch order
         sorted_batches = sorted(batches, key=lambda b: b.sequence_number)
+
+        if isolated:
+            savepoint = db.begin_nested()
+            try:
+                results = []
+                for b in sorted_batches:
+                    res = self.process_batch(db, opportunity_id, b, papers)
+                    results.append(res)
+                return results
+            finally:
+                savepoint.rollback()
+
         results = []
         for b in sorted_batches:
             res = self.process_batch(db, opportunity_id, b, papers)

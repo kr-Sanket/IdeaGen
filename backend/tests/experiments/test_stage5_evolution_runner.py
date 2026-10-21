@@ -21,7 +21,7 @@ from pathlib import Path
 import sys
 import tempfile
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import pymupdf
@@ -78,12 +78,14 @@ class Stage5MockLLMProvider(LLMProvider):
         fail_stage_5: bool = False,
         confidence: float = 0.88,
         model_name: str = "mock-stage5-llm:8b",
+        custom_stage_5_handler: Optional[Callable[[str, int], RelationshipClassification]] = None,
     ):
         self.relationship = relationship
         self.evidence_excerpt = evidence_excerpt
         self.fail_stage_5 = fail_stage_5
         self.confidence = confidence
         self._model_name = model_name
+        self.custom_stage_5_handler = custom_stage_5_handler
         self.stage_5_calls = 0
 
     @property
@@ -156,6 +158,8 @@ class Stage5MockLLMProvider(LLMProvider):
         # 5. Stage 5 relationship classification
         if response_schema == RelationshipClassification:
             self.stage_5_calls += 1
+            if self.custom_stage_5_handler is not None:
+                return self.custom_stage_5_handler(prompt, self.stage_5_calls)
             if self.fail_stage_5:
                 raise RuntimeError("Simulated Stage 5 classifier crash")
 
@@ -567,3 +571,198 @@ def test_build_temporal_batches_helper_logic():
     assert batches_dates[0].end_date == datetime.date(2023, 1, 15)
     assert batches_dates[1].end_date == datetime.date(2023, 6, 20)
     assert batches_dates[2].end_date == datetime.date(2024, 3, 10)
+
+
+def test_stage5_batch_durability_persists_evidence(temporal_pdf_corpus: Path, tmp_path: Path):
+    """Verifies that successfully processed batches persist evidence durably in the database."""
+    artifacts_dir = tmp_path / "artifacts_durability"
+    db_path = tmp_path / "durability_state.db"
+    provider = Stage5MockLLMProvider(
+        relationship=OpportunityRelationship.SUPPORTS,
+        evidence_excerpt="Retrieval-augmented generation enables large language models to ground their reasoning in external knowledge",
+    )
+    embedder = DeterministicExperimentEmbeddingProvider(64)
+
+    runner = ControlledExperimentRunner(
+        llm_provider=provider,
+        embedding_provider=embedder,
+        artifacts_dir=artifacts_dir,
+        db_path=str(db_path),
+        temporal_cutoff="2022-12-31",
+        enable_stage_5=True,
+        stage_5_cutoffs=["2023-12-31", "2024-12-31"],
+    )
+
+    res = runner.run(temporal_pdf_corpus)
+    assert res.success is True
+    assert db_path.exists()
+
+    # Open fresh independent connection to database file to verify durable persistence
+    verify_engine = create_engine(f"sqlite:///{db_path}")
+    with Session(verify_engine) as verify_session:
+        evidence_rows = verify_session.query(OpportunityEvidence).all()
+        assert len(evidence_rows) >= 2, f"Expected at least 2 persisted evidence rows, got {len(evidence_rows)}"
+        opps = verify_session.query(Opportunity).all()
+        assert len(opps) >= 1
+    verify_engine.dispose()
+
+
+def test_stage5_failed_pair_leaves_no_partial_writes(temporal_pdf_corpus: Path, tmp_path: Path):
+    """Verifies that a failed pair rolls back its savepoint and leaves zero partial writes."""
+    artifacts_dir = tmp_path / "artifacts_failed_pair"
+    db_path = tmp_path / "failed_pair_state.db"
+
+    # Make the second stage 5 call raise an unhandled error
+    def handler(prompt: str, call_count: int):
+        if call_count >= 2:
+            raise RuntimeError("Fatal unhandled pair crash")
+        return RelationshipClassification(
+            relationship=OpportunityRelationship.SUPPORTS,
+            confidence=0.88,
+            rationale="Passage provides grounded evidence regarding research opportunity.",
+            evidence_excerpt="Retrieval-augmented generation enables large language models to ground their reasoning in external knowledge",
+            prompt_version="v1",
+        )
+
+    provider = Stage5MockLLMProvider(custom_stage_5_handler=handler)
+    embedder = DeterministicExperimentEmbeddingProvider(64)
+
+    runner = ControlledExperimentRunner(
+        llm_provider=provider,
+        embedding_provider=embedder,
+        artifacts_dir=artifacts_dir,
+        db_path=str(db_path),
+        temporal_cutoff="2022-12-31",
+        enable_stage_5=True,
+        stage_5_cutoffs=["2023-12-31", "2024-12-31"],
+    )
+
+    res = runner.run(temporal_pdf_corpus)
+    # Batch 1 succeeded, Batch 2 failed on pair 2
+    assert res.success is False
+    assert "Stage 5 evolution failed" in res.error
+
+    # Verify that Batch 1 committed cleanly, and Batch 2's failed pair left no partial records
+    verify_engine = create_engine(f"sqlite:///{db_path}")
+    with Session(verify_engine) as verify_session:
+        evidence_rows = verify_session.query(OpportunityEvidence).all()
+        # Exactly 1 evidence row from Batch 1; zero partial rows from Batch 2
+        assert len(evidence_rows) == 1
+    verify_engine.dispose()
+
+
+def test_stage5_later_batch_proceeds_after_recoverable_pair_failure(temporal_pdf_corpus: Path, tmp_path: Path):
+    """Verifies that a recoverable pair failure (ungrounded evidence) discards the transition,
+    persists valid work, and permits subsequent batches to proceed."""
+    artifacts_dir = tmp_path / "artifacts_recoverable"
+    db_path = tmp_path / "recoverable_state.db"
+
+    # Calls 1 & 2 (Batch 1): ungrounded excerpt (recoverable failure for both opportunities)
+    # Calls 3 & 4 (Batch 2): grounded excerpt
+    def handler(prompt: str, call_count: int):
+        if call_count <= 2:
+            return RelationshipClassification(
+                relationship=OpportunityRelationship.SUPPORTS,
+                confidence=0.90,
+                rationale="Fabricated hallucination",
+                evidence_excerpt="Completely fabricated citation not present anywhere in the corpus passages",
+                prompt_version="v1",
+            )
+        return RelationshipClassification(
+            relationship=OpportunityRelationship.SUPPORTS,
+            confidence=0.88,
+            rationale="Passage provides grounded evidence regarding research opportunity.",
+            evidence_excerpt="Retrieval-augmented generation enables large language models to ground their reasoning in external knowledge",
+            prompt_version="v1",
+        )
+
+    provider = Stage5MockLLMProvider(custom_stage_5_handler=handler)
+    embedder = DeterministicExperimentEmbeddingProvider(64)
+
+    runner = ControlledExperimentRunner(
+        llm_provider=provider,
+        embedding_provider=embedder,
+        artifacts_dir=artifacts_dir,
+        db_path=str(db_path),
+        temporal_cutoff="2022-12-31",
+        enable_stage_5=True,
+        stage_5_cutoffs=["2023-12-31", "2024-12-31"],
+    )
+
+    res = runner.run(temporal_pdf_corpus)
+    assert res.success is True
+
+    s5 = res.metrics["stage_5_evolution"]
+    assert len(s5["per_batch_metrics"]) == 2
+
+    # Batch 1 rejected ungrounded excerpt for both opportunities
+    b1 = s5["per_batch_metrics"][0]
+    assert b1["grounding_rejections_count"] == 2
+    assert b1["processed_papers"] == 0
+
+    # Batch 2 proceeded and succeeded for both opportunities
+    b2 = s5["per_batch_metrics"][1]
+    assert b2["grounding_rejections_count"] == 0
+    assert b2["processed_papers"] == 2
+
+    # Database contains exactly the 2 grounded evidence rows from Batch 2
+    verify_engine = create_engine(f"sqlite:///{db_path}")
+    with Session(verify_engine) as verify_session:
+        evidence_rows = verify_session.query(OpportunityEvidence).all()
+        assert len(evidence_rows) == 2
+        for ev in evidence_rows:
+            assert "Retrieval-augmented generation" in ev.supporting_text
+    verify_engine.dispose()
+
+
+def test_stage5_resuming_skips_persisted_pairs(temporal_pdf_corpus: Path, tmp_path: Path):
+    """Verifies that resuming against an existing database skips already-persisted pairs
+    without re-invoking the LLM classifier."""
+    artifacts_dir = tmp_path / "artifacts_resume"
+    db_path = tmp_path / "resume_state.db"
+    provider_run1 = Stage5MockLLMProvider(
+        relationship=OpportunityRelationship.SUPPORTS,
+        evidence_excerpt="Retrieval-augmented generation enables large language models to ground their reasoning in external knowledge",
+    )
+    embedder = DeterministicExperimentEmbeddingProvider(64)
+
+    runner_run1 = ControlledExperimentRunner(
+        llm_provider=provider_run1,
+        embedding_provider=embedder,
+        artifacts_dir=artifacts_dir,
+        db_path=str(db_path),
+        temporal_cutoff="2022-12-31",
+        enable_stage_5=True,
+        stage_5_cutoffs=["2023-12-31"],
+    )
+
+    res1 = runner_run1.run(temporal_pdf_corpus)
+    assert res1.success is True
+    # 2 baseline opportunities evaluated against 1 eligible paper = 2 calls
+    assert provider_run1.stage_5_calls == 2
+
+    # Second run against the same persistent database with a tracking provider
+    provider_run2 = Stage5MockLLMProvider(
+        relationship=OpportunityRelationship.SUPPORTS,
+        evidence_excerpt="Retrieval-augmented generation enables large language models to ground their reasoning in external knowledge",
+    )
+    runner_run2 = ControlledExperimentRunner(
+        llm_provider=provider_run2,
+        embedding_provider=embedder,
+        artifacts_dir=artifacts_dir,
+        db_path=str(db_path),
+        temporal_cutoff="2022-12-31",
+        enable_stage_5=True,
+        stage_5_cutoffs=["2023-12-31"],
+    )
+
+    res2 = runner_run2.run(temporal_pdf_corpus)
+    assert res2.success is True
+
+    # Classifier was NOT called on resume because both pairs were already committed in the DB!
+    assert provider_run2.stage_5_calls == 0
+
+    s5_run2 = res2.metrics["stage_5_evolution"]
+    b1_run2 = s5_run2["per_batch_metrics"][0]
+    assert b1_run2["skipped_papers"] == 2
+    assert b1_run2["processed_papers"] == 0

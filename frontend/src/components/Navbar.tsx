@@ -1,72 +1,113 @@
-import React from 'react';
-import { Sparkles, BookOpen, GitFork, Lightbulb, BarChart3, FlaskConical } from 'lucide-react';
-
-export type TabView = 'overview' | 'literature' | 'landscape' | 'gaps' | 'opportunities' | 'evaluation';
+import React, { useEffect, useState } from 'react';
+import { Sparkles, Compass, BookOpen, Activity } from 'lucide-react';
+import { api } from '../api/client';
+import type { RouteName } from '../router';
 
 interface NavbarProps {
-  currentTab: TabView;
-  onSelectTab: (tab: TabView) => void;
+  currentRoute: RouteName;
+  onNavigate: (route: string) => void;
 }
 
-export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab }) => {
-  const navItems: { id: TabView; label: string; icon: React.ReactNode }[] = [
-    { id: 'overview', label: 'Overview', icon: <BarChart3 className="w-4 h-4" /> },
-    { id: 'literature', label: 'Literature', icon: <BookOpen className="w-4 h-4" /> },
-    { id: 'landscape', label: 'Research Landscape', icon: <GitFork className="w-4 h-4" /> },
-    { id: 'gaps', label: 'Research Gaps', icon: <Sparkles className="w-4 h-4" /> },
-    { id: 'opportunities', label: 'Opportunity Studio', icon: <Lightbulb className="w-4 h-4" /> },
-    { id: 'evaluation', label: 'Evaluation', icon: <FlaskConical className="w-4 h-4 text-slate-400" /> },
+export const Navbar: React.FC<NavbarProps> = ({ currentRoute, onNavigate }) => {
+  const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    const check = async () => {
+      const ok = await api.checkBackendConnection();
+      if (mounted) setBackendOnline(ok);
+    };
+    check();
+    const interval = setInterval(check, 15000);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, []);
+
+  const navItems = [
+    {
+      id: 'overview',
+      path: '#/overview',
+      label: 'Run Overview',
+      icon: <Activity size={16} />,
+      active: currentRoute === 'overview',
+    },
+    {
+      id: 'opportunities',
+      path: '#/opportunities',
+      label: 'Opportunities Explorer',
+      icon: <Compass size={16} />,
+      active: currentRoute === 'opportunities' || currentRoute === 'opportunity-detail',
+    },
+    {
+      id: 'corpus',
+      path: '#/corpus',
+      label: 'Corpus & Statements',
+      icon: <BookOpen size={16} />,
+      active: currentRoute === 'corpus',
+    },
   ];
 
   return (
-    <header className="sticky top-0 z-40 bg-slate-950/90 backdrop-blur-md border-b border-slate-800">
-      <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-        
-        {/* Brand logo */}
-        <div className="flex items-center space-x-3 cursor-pointer" onClick={() => onSelectTab('overview')}>
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-600 to-cyan-500 flex items-center justify-center shadow-lg shadow-indigo-500/20">
-            <Sparkles className="w-5 h-5 text-white" />
+    <header className="app-navbar">
+      <div className="navbar-container">
+        {/* Brand identity */}
+        <div
+          className="navbar-brand"
+          onClick={() => onNavigate('#/overview')}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => { if (e.key === 'Enter') onNavigate('#/overview'); }}
+        >
+          <div className="navbar-brand-icon">
+            <Sparkles size={20} />
           </div>
           <div>
-            <div className="flex items-center space-x-2">
-              <span className="font-bold text-lg tracking-tight text-white">IdeaGen</span>
-              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-800/60 font-semibold">
-                v2.0
-              </span>
+            <div className="u-row">
+              <span className="navbar-brand-name">IdeaGen</span>
+              <span className="navbar-brand-badge">Read-Only Explorer</span>
             </div>
-            <span className="text-[11px] text-slate-400 block -mt-1 font-sans">
-              Evidence-Grounded Research Discovery
+            <span className="navbar-brand-subtitle">
+              Proof-of-concept research experiment archive
             </span>
           </div>
         </div>
 
-        {/* Navigation Tabs */}
-        <nav className="flex space-x-1 bg-slate-900/80 p-1 rounded-xl border border-slate-800/80">
-          {navItems.map((item) => {
-            const active = currentTab === item.id;
-            return (
-              <button
-                key={item.id}
-                onClick={() => onSelectTab(item.id)}
-                className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                  active
-                    ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30 font-semibold'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-                }`}
-              >
-                {item.icon}
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
+        {/* Primary View Navigation */}
+        <nav className="navbar-nav" aria-label="Main Navigation">
+          {navItems.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => onNavigate(item.path)}
+              className={`navbar-tab-btn ${item.active ? 'active' : ''}`}
+              aria-current={item.active ? 'page' : undefined}
+            >
+              {item.icon}
+              <span>{item.label}</span>
+            </button>
+          ))}
         </nav>
 
-        {/* System Status indicator */}
-        <div className="flex items-center space-x-2 text-xs text-emerald-400 bg-emerald-950/40 px-3 py-1.5 rounded-full border border-emerald-800/40 font-mono">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-          <span>Pipeline Ready</span>
+        {/* Honest Backend Connectivity Indicator */}
+        <div className="navbar-status-wrapper">
+          {backendOnline === null ? (
+            <div className="status-indicator status-checking">
+              <span className="status-dot animate-pulse" />
+              <span>Checking API...</span>
+            </div>
+          ) : backendOnline ? (
+            <div className="status-indicator status-online" title="Backend FastAPI server is responding">
+              <span className="status-dot status-dot-online" />
+              <span>API Connected</span>
+            </div>
+          ) : (
+            <div className="status-indicator status-offline" title="Backend FastAPI server is unreachable or offline">
+              <span className="status-dot status-dot-offline" />
+              <span>API Offline</span>
+            </div>
+          )}
         </div>
-
       </div>
     </header>
   );

@@ -21,9 +21,10 @@ class OpenAlexClient:
         self.config = config
         
     def _make_request(self, url: str) -> Dict[str, Any]:
+        user_agent = f"IdeaGen (mailto:{self.config.polite_email})" if self.config.polite_email else "IdeaGen"
         req = urllib.request.Request(
             url, 
-            headers={"User-Agent": f"IdeaGen (mailto:{self.config.polite_email})"}
+            headers={"User-Agent": user_agent}
         )
         
         max_retries = 5
@@ -74,8 +75,9 @@ class OpenAlexClient:
         params = {
             "filter": ",".join(f"{k}:{v}" for k, v in self.config.query_filters.items()),
             "per_page": str(self.config.per_page),
-            "mailto": self.config.polite_email,
         }
+        if self.config.polite_email:
+            params["mailto"] = self.config.polite_email
         
         current_cursor = cursor
         

@@ -81,6 +81,9 @@ def api_test_env():
         validation_model="gemini-2.5-flash",
         embedding_model="gemini-embedding-001",
         pipeline_version="v1.0",
+        # Historical knowledge date (as the runner backdates to the baseline cutoff);
+        # evolution evidence must be published on or after it.
+        created_at=datetime.datetime(2023, 1, 1, tzinfo=datetime.timezone.utc),
     )
     session.add(opp_record)
 
@@ -93,6 +96,7 @@ def api_test_env():
         description="Native opportunity description",
         status=OpportunityStatus.OPEN.value,
         confidence=0.8,
+        created_at=datetime.datetime(2023, 1, 1, tzinfo=datetime.timezone.utc),
     )
     session.add(native_opp)
 
@@ -513,3 +517,117 @@ def test_endpoint_aliases_and_404_handling(api_test_env):
     assert client.get(f"/api/v1/opportunities/{unknown_id}/evidence").status_code == 404
     assert client.get(f"/api/opportunities/{unknown_id}/history").status_code == 404
     assert client.get(f"/api/opportunities/{unknown_id}/evidence").status_code == 404
+
+
+def test_reject_opportunity_created_after_cutoff(api_test_env):
+    """Evolution endpoint rejects an opportunity created strictly after the cutoff date."""
+    client, meta, session = api_test_env
+
+    # Create an opportunity created in 2024
+    future_opp_id = uuid.uuid4()
+    future_opp = Opportunity(
+        id=future_opp_id,
+        title="Future Opportunity 2024",
+        problem_statement="Problem statement from 2024",
+        description="Opportunity description from 2024",
+        status=OpportunityStatus.OPEN.value,
+        confidence=0.8,
+        created_at=datetime.datetime(2024, 1, 15, tzinfo=datetime.timezone.utc),
+    )
+    session.add(future_opp)
+    session.commit()
+
+    # Call /evolve with cutoff_date in 2023 (before opportunity creation)
+    resp = client.post(
+        f"/api/v1/opportunities/{future_opp_id}/evolve",
+        json={
+            "paper_ids": [str(meta["p1_id"])],
+            "cutoff_date": "2023-06-01",
+        },
+    )
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "after the requested cutoff date 2023-06-01" in detail
+
+
+def test_accept_opportunity_created_on_cutoff(api_test_env):
+    """Evolution endpoint accepts an opportunity created exactly on the cutoff date."""
+    client, meta, session = api_test_env
+
+    _mock_classifier_response(app, {
+        "Paper Alpha": RelationshipClassification(
+            relationship=OpportunityRelationship.ADDRESSES,
+            confidence=0.9,
+            rationale="Addresses on cutoff.",
+            evidence_excerpt="directly addresses constraint propagation errors",
+            prompt_version="1.0.0",
+        )
+    })
+
+    # Opportunity created on 2023-06-01
+    cutoff_opp_id = uuid.uuid4()
+    cutoff_opp = Opportunity(
+        id=cutoff_opp_id,
+        title="Cutoff Boundary Opportunity",
+        problem_statement="Problem statement on cutoff",
+        description="Opportunity description on cutoff",
+        status=OpportunityStatus.OPEN.value,
+        confidence=0.8,
+        created_at=datetime.datetime(2023, 6, 1, 12, 0, 0, tzinfo=datetime.timezone.utc),
+    )
+    session.add(cutoff_opp)
+    session.commit()
+
+    resp = client.post(
+        f"/api/v1/opportunities/{cutoff_opp_id}/evolve",
+        json={
+            "paper_ids": [str(meta["p1_id"])],
+            "cutoff_date": "2023-06-01",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    # The opportunity is accepted on the cutoff boundary, but Paper Alpha (2023-05-10) predates
+    # the opportunity (2023-06-01), so it cannot be evolution evidence.
+    assert data["processed_count"] == 0
+    assert data["skipped_count"] == 1
+    assert data["final_status"] == "OPEN"
+
+
+
+def test_papers_published_before_opportunity_are_not_evolution_evidence(api_test_env):
+    """Lower temporal bound: without any cutoff, a paper published before the opportunity's
+    effective creation date is skipped and never sent to the classifier."""
+    client, meta, session = api_test_env
+    calls = []
+
+    class _RecordingProvider:
+        def generate_structured(self, prompt, response_schema):
+            calls.append(prompt)
+            raise AssertionError("classifier must not be called for pre-opportunity papers")
+
+    app.dependency_overrides[get_relationship_classifier] = lambda: RelationshipClassifier(provider=_RecordingProvider())
+
+    late_opp_id = uuid.uuid4()
+    session.add(Opportunity(
+        id=late_opp_id,
+        title="Late Opportunity",
+        problem_statement="Problem identified after Paper Alpha was published",
+        description="Created 2023-07-01",
+        status=OpportunityStatus.OPEN.value,
+        confidence=0.8,
+        created_at=datetime.datetime(2023, 7, 1, tzinfo=datetime.timezone.utc),
+    ))
+    session.commit()
+
+    resp = client.post(
+        f"/api/v1/opportunities/{late_opp_id}/evolve",
+        json={"paper_ids": [str(meta["p1_id"]), str(meta["p_undated_id"])]},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["processed_count"] == 0
+    assert data["skipped_count"] == 2
+    assert data["events"] == []
+    assert data["final_status"] == "OPEN"
+    assert calls == []

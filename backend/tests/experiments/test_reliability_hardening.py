@@ -331,7 +331,7 @@ def test_batch_chunking_preserves_deterministic_order_and_results():
             relationship=OpportunityRelationship.SUPPORTS,
             confidence=0.9,
             rationale="Test supports",
-            evidence_excerpt=None,
+            evidence_excerpt="Abstract",
         )
         classifier = RelationshipClassifier(provider=mock_provider, max_retries=0)
         transition_svc = OpportunityTransitionService(session)
@@ -450,3 +450,37 @@ def test_fingerprint_includes_stage_5_reliability_settings():
     )
     mismatches = compare_fingerprints(fp1, fp2)
     assert any("Stage 5 chunk size mismatch" in m for m in mismatches)
+
+
+def test_fingerprint_records_classifier_prompt_version_and_rejects_legacy_stage_5():
+    """The Stage 5 classifier prompt version is fingerprinted; a pre-versioning (v1) Stage 5
+    fingerprint must not be resumed under a different prompt version."""
+    from ideagen.opportunity.classifier import RELATIONSHIP_CLASSIFIER_PROMPT_VERSION
+
+    kwargs = dict(
+        llm_provider=None,
+        llm_model="qwen3:8b",
+        embedding_provider=None,
+        embedding_model="nomic",
+        embedding_dimension=768,
+        max_passages=10,
+        max_total_words=2000,
+        extraction_schema_version="v1.0",
+        similarity_threshold=0.65,
+        min_supporting_evidence=1,
+    )
+    fp = compute_configuration_fingerprint(enable_stage_5=True, **kwargs)
+    assert fp["stage_5_classifier_prompt_version"] == RELATIONSHIP_CLASSIFIER_PROMPT_VERSION
+    assert compare_fingerprints(fp, dict(fp)) == []
+
+    legacy = dict(fp)
+    legacy.pop("stage_5_classifier_prompt_version")
+    mismatches = compare_fingerprints(legacy, fp)
+    assert any("classifier prompt version mismatch" in m for m in mismatches)
+
+    # Runs without Stage 5 are unaffected by the prompt version.
+    no_s5 = compute_configuration_fingerprint(enable_stage_5=False, **kwargs)
+    assert no_s5["stage_5_classifier_prompt_version"] is None
+    legacy_no_s5 = dict(no_s5)
+    legacy_no_s5.pop("stage_5_classifier_prompt_version")
+    assert compare_fingerprints(legacy_no_s5, no_s5) == []

@@ -35,3 +35,24 @@ def test_isolation_no_db_pollution():
     # But because they run on their own in-memory sqlite engine locally in the function,
     # they shouldn't affect anything anyway.
     pass
+
+
+def test_demo_scenario_labels_data_honestly():
+    from ideagen.api.demo_service import build_demo_scenario
+    from ideagen.api.schema import DEMO_DATA_NOTICE
+
+    data = build_demo_scenario().model_dump()
+    assert data["data_notice"] == DEMO_DATA_NOTICE
+    assert "scripted" in data["data_notice"]
+    result = data["leakage_protection"]["result"]
+    assert result != "Excluded by cutoff date."
+    future_title = data["leakage_protection"]["future_paper"]
+    evaluated_titles = {
+        ev["paper_title"] for batch in data["timeline"] for ev in batch["events"]
+    }
+    if future_title != "None":
+        assert result.startswith("Not excluded by date")
+        assert ("but no evolution event" not in result) == (future_title in evaluated_titles)
+    for batch in data["timeline"]:
+        for ev in batch["events"]:
+            assert "Real-Data" not in ev["excerpt"]

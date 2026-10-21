@@ -57,6 +57,27 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = Field(default=None, validation_alias=AliasChoices("IDEAGEN_GEMINI_API_KEY", "GEMINI_API_KEY"))
     gemini_model_name: str = Field(default="gemini-2.5-flash", validation_alias=AliasChoices("IDEAGEN_GEMINI_MODEL_NAME", "GEMINI_MODEL_NAME"))
 
+    # ── OpenAlex ──────────────────────────────────────────────────────
+    openalex_email: str | None = Field(default=None, validation_alias=AliasChoices("IDEAGEN_OPENALEX_EMAIL", "OPENALEX_EMAIL"))
+
+    # ── Evolution ─────────────────────────────────────────────────────
+    enable_post_ingestion_evolution: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "IDEAGEN_ENABLE_POST_INGESTION_EVOLUTION",
+            "ENABLE_POST_INGESTION_EVOLUTION",
+        ),
+    )
+    # Upper bound on eligible opportunities classified (one LLM call each) per ingested paper.
+    post_ingestion_evolution_max_candidates: int = Field(
+        default=20,
+        ge=1,
+        validation_alias=AliasChoices(
+            "IDEAGEN_POST_INGESTION_EVOLUTION_MAX_CANDIDATES",
+            "POST_INGESTION_EVOLUTION_MAX_CANDIDATES",
+        ),
+    )
+
     # ── Paths ─────────────────────────────────────────────────────────
     project_root: Path = _PROJECT_ROOT
     data_dir: Path = _PROJECT_ROOT / "data"

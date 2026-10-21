@@ -16,15 +16,17 @@ from ideagen.llm.exceptions import (
 
 logger = logging.getLogger(__name__)
 
-RELATIONSHIP_CLASSIFIER_PROMPT_VERSION = "v1"
+# v2: revised ADDRESSES vs EXTENDS definitions and instructions. Evidence produced
+# with "v1" predates this revision; runner fingerprints record the version used.
+RELATIONSHIP_CLASSIFIER_PROMPT_VERSION = "v2"
 
 RELATIONSHIP_CLASSIFIER_PROMPT = """You are an expert research assistant. Your task is to analyze a research paper against a known research opportunity and determine their relationship.
 
 Definitions:
 - SUPPORTS: The paper provides evidence that strengthens the existence or importance of the unresolved research opportunity. It does not substantially solve the opportunity.
-- ADDRESSES: The paper directly tackles the problem represented by the opportunity. It provides a method/result that reduces the unresolved aspect. This does NOT mean the opportunity is automatically RESOLVED.
+- ADDRESSES: The paper directly tackles, mitigates, or reduces the specific limitation or research problem stated in the opportunity's Problem Statement. It provides a method, architecture, or empirical result aimed at solving the opportunity. Partial mitigation of the problem is ADDRESSES. Do NOT classify as EXTENDS merely because the paper introduces a new framework or advances the field.
 - CONTRADICTS: The paper provides evidence that conflicts with a premise, claim, or assumption underlying the opportunity.
-- EXTENDS: The paper builds on, broadens, or redirects the research direction in a way related to the opportunity. EXTENDS does not automatically mean the opportunity is solved.
+- EXTENDS: The paper advances, broadens, or redirects a related research direction or applies related techniques, but does NOT directly tackle or mitigate the specific limitation stated in the Opportunity's Problem Statement.
 - UNRELATED: The paper is not materially relevant to the opportunity.
 
 Opportunity Context:
@@ -39,11 +41,17 @@ Excerpt: {paper_excerpt}
 
 Instructions:
 1. Compare the Paper Context against the Opportunity Context.
-2. Determine the relationship strictly from the provided Definitions.
-3. Determine a confidence score between 0.0 and 1.0.
-4. Provide a brief rationale.
-5. Identify a concise evidence_excerpt from the provided Paper Context that supports your classification (if applicable, else null). Do NOT fabricate evidence or add text outside the provided context.
+2. Judge the relationship strictly against the specific Opportunity Problem Statement, not the paper's overall scientific novelty or broader contribution.
+3. Distinguish ADDRESSES vs EXTENDS carefully:
+   - If the paper proposes a concrete method, model, or result that directly targets the Opportunity's stated problem, classify as ADDRESSES (even if the paper also expands the field).
+   - If the paper only develops adjacent techniques, generalizations, or follow-ups without directly tackling that specific stated limitation, classify as EXTENDS.
+   - Do NOT classify as ADDRESSES merely because the paper is in the same domain or cites similar work.
+4. Determine the relationship strictly from the provided Definitions.
+5. Determine a confidence score between 0.0 and 1.0.
+6. Provide a brief rationale explaining your decision with respect to the specific Opportunity Problem Statement.
+7. Identify a concise evidence_excerpt from the provided Paper Context that supports your classification (if applicable, else null). Do NOT fabricate evidence or add text outside the provided context.
 """
+
 
 class RelationshipClassificationInput(BaseModel):
     opportunity_title: str

@@ -456,3 +456,198 @@ def test_unrelated_database_or_classifier_error_not_swallowed(db_session):
 
     with pytest.raises(ProviderFailureError):
         service.process_batch(db_session, opp.id, batch, [paper])
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Checkpoint 4: Fail-Closed Evidence Grounding for Papers Without Passages
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _make_paper_without_passages(
+    session,
+    title="Paper Without Passages",
+    abstract="Caloric restriction significantly improves metabolic health in human trials.",
+    pub_date=datetime.date(2024, 3, 1),
+):
+    paper = Paper(
+        id=uuid.uuid4(),
+        source_type="MANUAL_UPLOAD",
+        source_id=f"test-source-{uuid.uuid4()}",
+        title=title,
+        publication_date=pub_date,
+        batch_id="test-batch",
+        abstract=abstract if abstract is not None else "",
+        authors=["Alice Smith"],
+        referenced_works=[],
+        raw_metadata={},
+    )
+    session.add(paper)
+    session.commit()
+    return paper
+
+
+def test_no_passages_substantive_relationship_null_quote_rejected(db_session):
+    paper = _make_paper_without_passages(db_session)
+    opp = _make_opportunity(db_session, status=OpportunityStatus.OPEN)
+
+    provider = FakeLLMProvider(response=RelationshipClassification(
+        relationship=OpportunityRelationship.SUPPORTS,
+        confidence=0.9,
+        rationale="Support claim without quote.",
+        evidence_excerpt=None,
+    ))
+    classifier = RelationshipClassifier(provider)
+    transition_svc = OpportunityTransitionService(db_session)
+    integration = OpportunityClassificationIntegration(classifier, transition_svc, db_session)
+
+    with pytest.raises(UngroundedEvidenceError):
+        integration.classify_and_apply(opp.id, paper.id)
+
+    db_session.rollback()
+    assert db_session.get(Opportunity, opp.id).status == OpportunityStatus.OPEN.value
+    assert len(db_session.execute(select(OpportunityEvidence)).scalars().all()) == 0
+    assert len(db_session.execute(select(OpportunityHistory)).scalars().all()) == 0
+
+
+def test_no_passages_substantive_relationship_quote_verified_against_abstract(db_session):
+    paper = _make_paper_without_passages(
+        db_session,
+        abstract="Caloric restriction significantly improves metabolic health in human trials."
+    )
+    opp = _make_opportunity(db_session, status=OpportunityStatus.OPEN)
+
+    provider = FakeLLMProvider(response=RelationshipClassification(
+        relationship=OpportunityRelationship.SUPPORTS,
+        confidence=0.95,
+        rationale="Abstract shows metabolic improvement.",
+        evidence_excerpt="improves metabolic health in human trials",
+    ))
+    classifier = RelationshipClassifier(provider)
+    transition_svc = OpportunityTransitionService(db_session)
+    integration = OpportunityClassificationIntegration(classifier, transition_svc, db_session)
+
+    result = integration.classify_and_apply(opp.id, paper.id)
+    db_session.commit()
+
+    assert result.state_changed is True
+    assert result.previous_status == OpportunityStatus.OPEN
+    assert result.new_status == OpportunityStatus.STRENGTHENED
+
+    opp_refreshed = db_session.get(Opportunity, opp.id)
+    assert opp_refreshed.status == OpportunityStatus.STRENGTHENED.value
+
+    ev_rows = db_session.execute(select(OpportunityEvidence)).scalars().all()
+    assert len(ev_rows) == 1
+    assert "improves metabolic health" in ev_rows[0].supporting_text
+
+
+def test_no_passages_substantive_relationship_quote_absent_from_abstract_rejected(db_session):
+    paper = _make_paper_without_passages(
+        db_session,
+        abstract="Caloric restriction significantly improves metabolic health in human trials."
+    )
+    opp = _make_opportunity(db_session, status=OpportunityStatus.OPEN)
+
+    provider = FakeLLMProvider(response=RelationshipClassification(
+        relationship=OpportunityRelationship.SUPPORTS,
+        confidence=0.95,
+        rationale="Completely hallucinated claim.",
+        evidence_excerpt="completely eliminates Alzheimer's disease and reverses biological clock",
+    ))
+    classifier = RelationshipClassifier(provider)
+    transition_svc = OpportunityTransitionService(db_session)
+    integration = OpportunityClassificationIntegration(classifier, transition_svc, db_session)
+
+    with pytest.raises(UngroundedEvidenceError, match="is not grounded in stored passages"):
+        integration.classify_and_apply(opp.id, paper.id)
+
+    db_session.rollback()
+    assert db_session.get(Opportunity, opp.id).status == OpportunityStatus.OPEN.value
+    assert len(db_session.execute(select(OpportunityEvidence)).scalars().all()) == 0
+    assert len(db_session.execute(select(OpportunityHistory)).scalars().all()) == 0
+
+
+def test_no_passages_no_abstract_substantive_relationship_rejected(db_session):
+    paper = _make_paper_without_passages(
+        db_session,
+        abstract=""
+    )
+    opp = _make_opportunity(db_session, status=OpportunityStatus.OPEN)
+
+    provider = FakeLLMProvider(response=RelationshipClassification(
+        relationship=OpportunityRelationship.ADDRESSES,
+        confidence=0.85,
+        rationale="Paper claims to address problem.",
+        evidence_excerpt="addresses problem statement",
+    ))
+    classifier = RelationshipClassifier(provider)
+    transition_svc = OpportunityTransitionService(db_session)
+    integration = OpportunityClassificationIntegration(classifier, transition_svc, db_session)
+
+    with pytest.raises(UngroundedEvidenceError, match="neither stored passages nor abstract"):
+        integration.classify_and_apply(opp.id, paper.id)
+
+    db_session.rollback()
+    assert db_session.get(Opportunity, opp.id).status == OpportunityStatus.OPEN.value
+    assert len(db_session.execute(select(OpportunityEvidence)).scalars().all()) == 0
+    assert len(db_session.execute(select(OpportunityHistory)).scalars().all()) == 0
+
+
+def test_no_passages_unrelated_relationship_accepted_without_quote(db_session):
+    paper = _make_paper_without_passages(
+        db_session,
+        abstract=""
+    )
+    opp = _make_opportunity(db_session, status=OpportunityStatus.OPEN)
+
+    provider = FakeLLMProvider(response=RelationshipClassification(
+        relationship=OpportunityRelationship.UNRELATED,
+        confidence=0.99,
+        rationale="Completely different topic.",
+        evidence_excerpt=None,
+    ))
+    classifier = RelationshipClassifier(provider)
+    transition_svc = OpportunityTransitionService(db_session)
+    integration = OpportunityClassificationIntegration(classifier, transition_svc, db_session)
+
+    result = integration.classify_and_apply(opp.id, paper.id)
+    db_session.commit()
+
+    assert result.state_changed is False
+    assert result.previous_status == OpportunityStatus.OPEN
+    assert result.new_status == OpportunityStatus.OPEN
+
+    opp_refreshed = db_session.get(Opportunity, opp.id)
+    assert opp_refreshed.status == OpportunityStatus.OPEN.value
+
+    # UNRELATED creates an evidence record to mark examination, but no history transition
+    ev_rows = db_session.execute(select(OpportunityEvidence)).scalars().all()
+    assert len(ev_rows) == 1
+    assert ev_rows[0].evidence_type == OpportunityRelationship.UNRELATED.value
+
+    hist_rows = db_session.execute(select(OpportunityHistory)).scalars().all()
+    assert len(hist_rows) == 0
+
+
+def test_rejected_evidence_creates_no_record_or_transition(db_session):
+    # Test service level rejection directly
+    paper = _make_paper_without_passages(db_session, abstract="Real abstract text.")
+    opp = _make_opportunity(db_session, status=OpportunityStatus.OPEN)
+
+    svc = OpportunityTransitionService(db_session)
+
+    # 1. Null quote rejection
+    with pytest.raises(UngroundedEvidenceError):
+        svc.apply_relationship(opp.id, paper.id, OpportunityRelationship.SUPPORTS, evidence_excerpt=None)
+    db_session.rollback()
+
+    # 2. Unverifiable quote rejection
+    with pytest.raises(UngroundedEvidenceError):
+        svc.apply_relationship(opp.id, paper.id, OpportunityRelationship.CONTRADICTS, evidence_excerpt="Nonexistent text")
+    db_session.rollback()
+
+    # Verify database remains completely untouched
+    opp_refreshed = db_session.get(Opportunity, opp.id)
+    assert opp_refreshed.status == OpportunityStatus.OPEN.value
+
+    assert len(db_session.execute(select(OpportunityEvidence)).scalars().all()) == 0
+    assert len(db_session.execute(select(OpportunityHistory)).scalars().all()) == 0

@@ -1,86 +1,87 @@
-import { useState } from 'react';
-import { Navbar, type TabView } from './components/Navbar';
-import { OverviewView } from './components/OverviewView';
-import { LiteratureView } from './components/LiteratureView';
-import { LandscapeView } from './components/LandscapeView';
-import { GapExplorerView } from './components/GapExplorerView';
-import { OpportunityStudioView } from './components/OpportunityStudioView';
-import { EvaluationView } from './components/EvaluationView';
+import { useState, useEffect } from 'react';
+import { useRoute } from './router';
+import { Navbar } from './components/Navbar';
+import { RunOverviewView } from './components/views/RunOverviewView';
+import { OpportunitiesExplorerView } from './components/views/OpportunitiesExplorerView';
+import { OpportunityDetailView } from './components/views/OpportunityDetailView';
+import { CorpusInspectorView } from './components/views/CorpusInspectorView';
 import { EvidenceDrawer } from './components/EvidenceDrawer';
+import { ErrorBoundary } from './components/common/ErrorBoundary';
 import './App.css';
 
 export function App() {
-  const [currentTab, setCurrentTab] = useState<TabView>('overview');
-  const [activeEvidenceStatementId, setActiveEvidenceStatementId] = useState<string | null>(null);
+  const { route, navigate } = useRoute();
+  const [activeStatementId, setActiveStatementId] = useState<string | null>(null);
+
+  // Deep-link check for statement_id in query params
+  useEffect(() => {
+    if (route.params.statement_id) {
+      setActiveStatementId(route.params.statement_id);
+    }
+  }, [route.params.statement_id]);
 
   const handleInspectEvidence = (statementId: string) => {
-    setActiveEvidenceStatementId(statementId);
+    setActiveStatementId(statementId);
   };
 
   const handleCloseEvidence = () => {
-    setActiveEvidenceStatementId(null);
-  };
-
-  const handleGenerateOpportunity = () => {
-    setCurrentTab('opportunities');
+    setActiveStatementId(null);
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans antialiased flex flex-col selection:bg-indigo-500 selection:text-white">
-      
-      {/* Top Navbar */}
-      <Navbar currentTab={currentTab} onSelectTab={setCurrentTab} />
+    <ErrorBoundary>
+      <div className="app-shell">
+        {/* Navigation Bar */}
+        <Navbar
+          currentRoute={route.name}
+          onNavigate={navigate}
+        />
 
-      {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-6 py-8">
-        {currentTab === 'overview' && (
-          <OverviewView onSelectTab={setCurrentTab} />
-        )}
+        {/* Primary Page Content */}
+        <main className="app-main-content">
+          {route.name === 'overview' && (
+            <RunOverviewView onNavigate={navigate} />
+          )}
 
-        {currentTab === 'literature' && (
-          <LiteratureView onInspectEvidence={handleInspectEvidence} />
-        )}
+          {route.name === 'opportunities' && (
+            <OpportunitiesExplorerView onNavigate={navigate} />
+          )}
 
-        {currentTab === 'landscape' && (
-          <LandscapeView onInspectEvidence={handleInspectEvidence} />
-        )}
+          {route.name === 'opportunity-detail' && (
+            <OpportunityDetailView
+              opportunityId={route.params.id || ''}
+              onNavigate={navigate}
+              onInspectEvidence={handleInspectEvidence}
+            />
+          )}
 
-        {currentTab === 'gaps' && (
-          <GapExplorerView
-            onInspectEvidence={handleInspectEvidence}
-            onSelectTab={setCurrentTab}
-            onGenerateOpportunity={handleGenerateOpportunity}
-          />
-        )}
+          {route.name === 'corpus' && (
+            <CorpusInspectorView
+              initialPaperId={route.params.paper_id || null}
+              onInspectEvidence={handleInspectEvidence}
+            />
+          )}
+        </main>
 
-        {currentTab === 'opportunities' && (
-          <OpportunityStudioView
-            onInspectEvidence={handleInspectEvidence}
-          />
-        )}
+        {/* Statement Source Provenance Drawer */}
+        <EvidenceDrawer
+          statementId={activeStatementId}
+          onClose={handleCloseEvidence}
+        />
 
-        {currentTab === 'evaluation' && (
-          <EvaluationView />
-        )}
-      </main>
-
-      {/* Reusable Ground Evidence Provenance Drawer */}
-      <EvidenceDrawer
-        statementId={activeEvidenceStatementId}
-        onClose={handleCloseEvidence}
-      />
-
-      {/* Footer */}
-      <footer className="border-t border-slate-900 bg-slate-950 py-6 text-center text-xs text-slate-400">
-        <div className="max-w-7xl mx-auto px-6 flex flex-col sm:flex-row items-center justify-between gap-2">
-          <span>IdeaGen — Evidence-Grounded Research Discovery System</span>
-          <span className="font-mono text-slate-400">
-            Phase 6 Pipeline Active · Potentially novel within analyzed corpus
-          </span>
-        </div>
-      </footer>
-
-    </div>
+        {/* Application Footer */}
+        <footer className="app-footer">
+          <div className="app-footer-container">
+            <span className="app-footer-brand">
+              IdeaGen — Evidence-Grounded Research Discovery & Opportunity Evolution Archive
+            </span>
+            <span className="app-footer-tagline">
+              Read-only explorer · Proof-of-concept research prototype
+            </span>
+          </div>
+        </footer>
+      </div>
+    </ErrorBoundary>
   );
 }
 

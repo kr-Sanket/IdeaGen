@@ -36,7 +36,9 @@ class TestSettingsDefaults:
         assert isinstance(settings.processed_data_dir, Path)
         assert isinstance(settings.index_dir, Path)
 
-    def test_data_dir_structure(self) -> None:
+    def test_data_dir_structure(self, monkeypatch) -> None:
+        # Defaults only: drop the test-wide index isolation override from conftest.
+        monkeypatch.delenv("IDEAGEN_INDEX_DIR", raising=False)
         settings = Settings()
         assert settings.raw_data_dir == settings.data_dir / "raw"
         assert settings.processed_data_dir == settings.data_dir / "processed"

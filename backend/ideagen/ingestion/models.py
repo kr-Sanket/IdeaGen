@@ -29,7 +29,7 @@ class PaperCreateDTO(BaseModel):
 
 class IngestionConfig(BaseModel):
     query_filters: Dict[str, str] = Field(description="OpenAlex query filters (e.g. title_and_abstract.search)")
-    polite_email: str
+    polite_email: Optional[str] = None
     base_url: str = "https://api.openalex.org/works"
     per_page: int = 50
 

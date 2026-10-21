@@ -56,7 +56,23 @@ from tests.opportunity.fake_provider import FakeLLMProvider
 def mock_pipeline_dependencies():
     """Ensure API endpoints do not make network calls or require live LLM/embedding servers offline."""
     fake_provider = FakeEmbeddingProvider()
-    fake_llm = FakeLLMProvider(response={})
+    valid_mock_response = {
+        "proposed_research_direction": "Investigate dynamic context constraints for multi-hop RAG.",
+        "reasoning": "Multi-hop RAG suffers from compounding retrieval error propagation.",
+        "technical_approach": "Step-wise consistency filtering and selective context pruning.",
+        "expected_contribution": "Bounded hallucination rate in multi-hop question answering.",
+        "required_data": "Multi-hop QA benchmark corpora",
+        "required_compute": "1x GPU workstation",
+        "implementation_complexity": "Moderate",
+        "experimental_setup": "Compare against standard 2-hop baseline models",
+        "feasibility_score": 0.85,
+        "confidence": 0.88,
+        "assessment": "Potentially novel within the analyzed corpus",
+        "differentiation": "Prior methods do not prune intermediate context errors.",
+        "overlapping_statement_indices": [],
+    }
+    fake_llm = FakeLLMProvider(response=valid_mock_response)
+
     with patch(
         "ideagen.discovery.pipeline.get_default_embedding_provider",
         return_value=fake_provider,

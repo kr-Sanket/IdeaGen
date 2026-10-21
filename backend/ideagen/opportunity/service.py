@@ -3,6 +3,7 @@ from typing import Optional, Sequence, Union
 import uuid
 from sqlalchemy.orm import Session
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from ideagen.db.models import Opportunity, Paper, PaperPassage, OpportunityEvidence, OpportunityHistory
 from ideagen.opportunity.models import OpportunityRelationship, OpportunityStatus
@@ -118,26 +119,27 @@ class OpportunityTransitionService:
             .order_by(PaperPassage.passage_index)
         ).scalars().all()
 
-        if stored_passages and relationship in SUBSTANTIVE_RELATIONSHIPS:
-            validate_evidence_grounding(
-                excerpt=evidence_excerpt,
-                passages=stored_passages,
-                relationship=relationship,
-                paper_id=paper_id,
-            )
-        elif evidence_excerpt is not None and relationship in SUBSTANTIVE_RELATIONSHIPS:
-            sources = [paper.abstract] if paper.abstract else []
-            if sources:
+        if relationship in SUBSTANTIVE_RELATIONSHIPS:
+            if stored_passages:
                 validate_evidence_grounding(
                     excerpt=evidence_excerpt,
-                    passages=sources,
+                    passages=stored_passages,
                     relationship=relationship,
                     paper_id=paper_id,
                 )
             else:
-                raise UngroundedEvidenceError(
-                    f"Evidence excerpt cannot be grounded: paper {paper_id} has neither stored passages nor abstract."
-                )
+                sources = [paper.abstract] if paper.abstract and paper.abstract.strip() else []
+                if sources:
+                    validate_evidence_grounding(
+                        excerpt=evidence_excerpt,
+                        passages=sources,
+                        relationship=relationship,
+                        paper_id=paper_id,
+                    )
+                else:
+                    raise UngroundedEvidenceError(
+                        f"Evidence excerpt cannot be grounded: paper {paper_id} has neither stored passages nor abstract."
+                    )
 
         # 1. Create Evidence and flush to persist in current transaction
         evidence = OpportunityEvidence(
@@ -146,19 +148,59 @@ class OpportunityTransitionService:
             evidence_type=relationship.value,
             supporting_text=evidence_excerpt
         )
-        self.session.add(evidence)
-        self.session.flush()
+        # begin_nested() flushes already-pending state itself, so open the savepoint
+        # before adding the evidence: any IntegrityError raised inside the try block
+        # then comes from this insert, and the savepoint is always bound.
+        sp = self.session.begin_nested()
+        try:
+            self.session.add(evidence)
+            self.session.flush()
+        except IntegrityError as err:
+            sp.rollback()
+            # Handle uniqueness conflicts as idempotent duplicate results where appropriate,
+            # without hiding unrelated IntegrityError failures or leaving the session unusable.
+            concurrent_evidence = self.session.execute(
+                select(OpportunityEvidence)
+                .where(
+                    OpportunityEvidence.opportunity_id == opportunity_id,
+                    OpportunityEvidence.paper_id == paper_id,
+                )
+            ).scalar_one_or_none()
+            if concurrent_evidence is not None:
+                raise ValueError(
+                    f"Evidence from Paper {paper_id} already exists for Opportunity {opportunity_id}."
+                ) from err
+            raise
+        sp.commit()
 
         # 2. Determine addressing paper count for multi-paper resolution rule
         addressing_paper_count = 1
         if relationship == OpportunityRelationship.ADDRESSES:
-            addressing_evidences = self.session.execute(
-                select(OpportunityEvidence)
+            # Check for latest reopening event from RESOLVED -> OPEN triggered by CONTRADICTS
+            latest_reopen = self.session.execute(
+                select(OpportunityHistory)
                 .where(
-                    OpportunityEvidence.opportunity_id == opportunity_id,
-                    OpportunityEvidence.evidence_type == OpportunityRelationship.ADDRESSES.value,
+                    OpportunityHistory.opportunity_id == opportunity_id,
+                    OpportunityHistory.previous_status == OpportunityStatus.RESOLVED.value,
+                    OpportunityHistory.new_status == OpportunityStatus.OPEN.value,
+                    OpportunityHistory.trigger_type == OpportunityRelationship.CONTRADICTS.value,
                 )
-            ).scalars().all()
+                .order_by(OpportunityHistory.created_at.desc(), OpportunityHistory.id.desc())
+            ).scalars().first()
+
+            ev_stmt = select(OpportunityEvidence).where(
+                OpportunityEvidence.opportunity_id == opportunity_id,
+                OpportunityEvidence.evidence_type == OpportunityRelationship.ADDRESSES.value,
+            )
+            if latest_reopen is not None:
+                # Old addressing evidence predating the reopening boundary must not count toward
+                # the two-new-distinct-addressing-papers requirement after reopening.
+                ev_stmt = ev_stmt.where(
+                    (OpportunityEvidence.created_at > latest_reopen.created_at) |
+                    (OpportunityEvidence.id == evidence.id)
+                )
+
+            addressing_evidences = self.session.execute(ev_stmt).scalars().all()
             ev_paper_ids = list({ev.paper_id for ev in addressing_evidences})
             if ev_paper_ids:
                 papers = self.session.execute(

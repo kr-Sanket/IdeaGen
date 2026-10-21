@@ -1,0 +1,22 @@
+[
+  {
+    "filename": "lewis2020_rag.pdf",
+    "title": "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
+    "publication_date": "2020-05-22",
+    "doi": "10.48550/arXiv.2005.11401",
+    "authors": [
+      {"name": "Patrick Lewis"},
+      {"name": "Ethan Perez"},
+      {"name": "Aleksandra Piktus"},
+      {"name": "Fabio Petroni"},
+      {"name": "Vladimir Karpukhin"},
+      {"name": "Naman Goyal"},
+      {"name": "Heinrich Küttler"},
+      {"name": "Mike Lewis"},
+      {"name": "Wen-tau Yih"},
+      {"name": "Tim Rocktäschel"},
+      {"name": "Sebastian Riedel"},
+      {"name": "Douwe Kiela"}
+    ]
+  }
+]

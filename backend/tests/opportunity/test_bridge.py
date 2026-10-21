@@ -495,11 +495,15 @@ def test_alembic_migration_graph():
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
-    config = Config("backend/alembic.ini")
+    from pathlib import Path
+
+    config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
 
     heads = script.get_heads()
-    assert heads == ["b4e67f1a9c23"], f"Expected single head b4e67f1a9c23, got {heads}"
+    assert heads == ["e7b3c9a14f52"], f"Expected single head, got {heads}"
+    assert script.get_revision("e7b3c9a14f52").down_revision == "d5e8a71b2c40"
+    assert script.get_revision("d5e8a71b2c40").down_revision == "b4e67f1a9c23"
 
     bridge_rev = script.get_revision("b4e67f1a9c23")
     assert bridge_rev is not None

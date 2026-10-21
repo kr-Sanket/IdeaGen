@@ -91,7 +91,7 @@ class PaperPassage(Base):
     paper: Mapped["Paper"] = sqlalchemy.orm.relationship()
 
 from ideagen.opportunity.models import OpportunityStatus, OpportunityRelationship
-from sqlalchemy import Float, CheckConstraint
+from sqlalchemy import Float, CheckConstraint, UniqueConstraint
 
 class Opportunity(Base):
     __tablename__ = "opportunities"
@@ -140,6 +140,10 @@ class OpportunityEvidence(Base):
     )
     supporting_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     
+    __table_args__ = (
+        UniqueConstraint("opportunity_id", "paper_id", name="uq_opportunity_evidence_opp_paper"),
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -328,3 +332,9 @@ class OpportunityRefinementRecord(Base):
     opportunity: Mapped["ResearchOpportunityRecord"] = sqlalchemy.orm.relationship(back_populates="iterations")
 
 
+class ExperimentMetadataRecord(Base):
+    """Stores key-value experiment metadata such as configuration fingerprints."""
+    __tablename__ = "experiment_metadata"
+
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)

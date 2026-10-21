@@ -20,22 +20,100 @@ from .models import (
     GapEvidence,
 )
 
+from contextlib import contextmanager
+
 class SQLAlchemyPersistenceLayer:
     def __init__(self, session: Session):
         self.session = session
+        self._in_transaction = False
+
+    @contextmanager
+    def transaction(self) -> Iterator[SQLAlchemyPersistenceLayer]:
+        """Scoped transaction / Unit of Work context manager.
+
+        Suppresses per-entity commits, flushes to assign IDs, and commits atomically
+        at the end of the block. If an exception occurs, rolls back all changes atomically.
+        """
+        if self._in_transaction:
+            # Nested call joins existing transaction boundary
+            yield self
+            return
+
+        self._in_transaction = True
+        try:
+            yield self
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        finally:
+            self._in_transaction = False
         
     def paper_exists_by_source_id(self, source_type: str, source_id: str) -> bool:
+        if not source_id:
+            return False
+        st_val = source_type.value if hasattr(source_type, "value") else str(source_type)
+        from ideagen.ingestion.parser import PaperNormalizer
+        norm_id = PaperNormalizer.canonical_openalex_source_id(source_id) or source_id
+        candidates = {source_id, norm_id}
+        if norm_id.startswith("W"):
+            candidates.add(f"https://openalex.org/{norm_id}")
+            candidates.add(f"http://openalex.org/{norm_id}")
         stmt = select(Paper.id).where(
-            Paper.source_type == source_type,
-            Paper.source_id == source_id
+            Paper.source_type == st_val,
+            Paper.source_id.in_(candidates)
         )
         return self.session.scalar(stmt) is not None
-        
+
+    def get_paper_id_by_source_id(self, source_type: str, source_id: str) -> Optional[uuid.UUID]:
+        if not source_id:
+            return None
+        st_val = source_type.value if hasattr(source_type, "value") else str(source_type)
+        from ideagen.ingestion.parser import PaperNormalizer
+        norm_id = PaperNormalizer.canonical_openalex_source_id(source_id) or source_id
+        candidates = {source_id, norm_id}
+        if norm_id.startswith("W"):
+            candidates.add(f"https://openalex.org/{norm_id}")
+            candidates.add(f"http://openalex.org/{norm_id}")
+
+        stmt = select(Paper.id).where(
+            Paper.source_type == st_val,
+            Paper.source_id.in_(candidates)
+        )
+        results = list(set(self.session.scalars(stmt).all()))
+        if len(results) == 1:
+            return results[0]
+        return None
+
     def paper_exists_by_doi(self, doi: str) -> bool:
-        stmt = select(Paper.id).where(Paper.doi == doi)
+        if not doi:
+            return False
+        from ideagen.ingestion.parser import PaperNormalizer
+        norm_doi = PaperNormalizer.normalize_doi(doi) or doi
+        candidates = {doi, norm_doi}
+        if not norm_doi.startswith("http"):
+            candidates.add(f"https://doi.org/{norm_doi}")
+            candidates.add(f"http://doi.org/{norm_doi}")
+        stmt = select(Paper.id).where(Paper.doi.in_(candidates))
         return self.session.scalar(stmt) is not None
+
+    def get_paper_id_by_doi(self, doi: str) -> Optional[uuid.UUID]:
+        if not doi:
+            return None
+        from ideagen.ingestion.parser import PaperNormalizer
+        norm_doi = PaperNormalizer.normalize_doi(doi) or doi
+        candidates = {doi, norm_doi}
+        if not norm_doi.startswith("http"):
+            candidates.add(f"https://doi.org/{norm_doi}")
+            candidates.add(f"http://doi.org/{norm_doi}")
+
+        stmt = select(Paper.id).where(Paper.doi.in_(candidates))
+        results = list(set(self.session.scalars(stmt).all()))
+        if len(results) == 1:
+            return results[0]
+        return None
         
-    def save_paper(self, paper_dto: PaperCreateDTO) -> uuid.UUID:
+    def save_paper(self, paper_dto: PaperCreateDTO, commit: Optional[bool] = None) -> uuid.UUID:
         paper = Paper(
             source_type=paper_dto.source_type.value,
             source_id=paper_dto.source_id,
@@ -48,16 +126,31 @@ class SQLAlchemyPersistenceLayer:
             referenced_works=paper_dto.referenced_works,
             raw_metadata=paper_dto.raw_metadata
         )
+        should_commit = commit if commit is not None else not self._in_transaction
         try:
             self.session.add(paper)
-            self.session.commit()
+            if should_commit:
+                self.session.commit()
+            else:
+                self.session.flush()
             return paper.id
         except IntegrityError as e:
-            self.session.rollback()
+            if should_commit:
+                self.session.rollback()
             raise ValueError(f"IntegrityError saving paper: {e}")
         except Exception as e:
-            self.session.rollback()
+            if should_commit:
+                self.session.rollback()
             raise e
+
+    def delete_paper(self, paper_id: uuid.UUID) -> bool:
+        from .models import Paper
+        paper = self.session.query(Paper).filter(Paper.id == paper_id).first()
+        if paper:
+            self.session.delete(paper)
+            self.session.commit()
+            return True
+        return False
 
     def document_exists_by_hash(self, content_hash: str) -> bool:
         if not content_hash:
@@ -73,7 +166,7 @@ class SQLAlchemyPersistenceLayer:
         stmt = select(PaperDocument).where(PaperDocument.content_hash == content_hash)
         return self.session.scalar(stmt)
 
-    def save_paper_document(self, doc_dto: 'ideagen.ingestion.models.PaperDocumentCreateDTO') -> uuid.UUID:
+    def save_paper_document(self, doc_dto: 'ideagen.ingestion.models.PaperDocumentCreateDTO', commit: Optional[bool] = None) -> uuid.UUID:
         from .models import PaperDocument
         doc = PaperDocument(
             paper_id=doc_dto.paper_id,
@@ -86,18 +179,24 @@ class SQLAlchemyPersistenceLayer:
             acquisition_timestamp=getattr(doc_dto, "acquisition_timestamp", None),
             provenance_metadata=getattr(doc_dto, "provenance_metadata", None),
         )
+        should_commit = commit if commit is not None else not self._in_transaction
         try:
             self.session.add(doc)
-            self.session.commit()
+            if should_commit:
+                self.session.commit()
+            else:
+                self.session.flush()
             return doc.id
         except IntegrityError as e:
-            self.session.rollback()
+            if should_commit:
+                self.session.rollback()
             raise ValueError(f"IntegrityError saving paper document: {e}")
         except Exception as e:
-            self.session.rollback()
+            if should_commit:
+                self.session.rollback()
             raise e
 
-    def save_passages(self, passage_dtos: list['ideagen.ingestion.models.PassageCreateDTO']) -> None:
+    def save_passages(self, passage_dtos: list['ideagen.ingestion.models.PassageCreateDTO'], commit: Optional[bool] = None) -> None:
         if not passage_dtos:
             return
         from .models import PaperPassage
@@ -113,14 +212,20 @@ class SQLAlchemyPersistenceLayer:
             )
             for dto in passage_dtos
         ]
+        should_commit = commit if commit is not None else not self._in_transaction
         try:
             self.session.add_all(passages)
-            self.session.commit()
+            if should_commit:
+                self.session.commit()
+            else:
+                self.session.flush()
         except IntegrityError as e:
-            self.session.rollback()
+            if should_commit:
+                self.session.rollback()
             raise ValueError(f"IntegrityError saving paper passages: {e}")
         except Exception as e:
-            self.session.rollback()
+            if should_commit:
+                self.session.rollback()
             raise e
 
     def get_passages_by_document(self, document_id: uuid.UUID) -> list['PaperPassage']:

@@ -1,12 +1,13 @@
 import type {
-  WorkspaceStats,
-  PaperResponse,
-  ResearchKnowledgeResponse,
-  StatementResponse,
-  GapResponse,
-  OpportunityResponse,
+  RunMetadata,
+  OpportunitySummary,
   OpportunityReport,
+  OpportunityEvidenceItem,
+  OpportunityHistoryItem,
+  PaperItem,
+  StatementItem,
   EvidenceDetail,
+  GapItem,
 } from '../types';
 
 const API_BASE = '/api/v1';
@@ -20,7 +21,7 @@ async function handleResponse<T>(res: Response): Promise<T> {
         errorMsg = typeof errJson.detail === 'string' ? errJson.detail : JSON.stringify(errJson.detail);
       }
     } catch {
-      // no json body
+      // response has no json body
     }
     throw new Error(errorMsg);
   }
@@ -28,73 +29,109 @@ async function handleResponse<T>(res: Response): Promise<T> {
 }
 
 export const api = {
-  async getStats(): Promise<WorkspaceStats> {
-    const res = await fetch(`${API_BASE}/stats`);
-    return handleResponse<WorkspaceStats>(res);
+  /**
+   * Fetches run identity, cutoffs, screening decisions, and corpus counts.
+   */
+  async getRunMetadata(): Promise<RunMetadata> {
+    const res = await fetch(`${API_BASE}/run-metadata`);
+    return handleResponse<RunMetadata>(res);
   },
 
-  async getPapers(): Promise<PaperResponse[]> {
-    const res = await fetch(`${API_BASE}/papers`);
-    return handleResponse<PaperResponse[]>(res);
-  },
-
-  async getPaperDetail(paperId: string): Promise<PaperResponse> {
-    const res = await fetch(`${API_BASE}/papers/${paperId}`);
-    return handleResponse<PaperResponse>(res);
-  },
-
-  async getPaperKnowledge(paperId: string): Promise<ResearchKnowledgeResponse> {
-    const res = await fetch(`${API_BASE}/papers/${paperId}/knowledge`);
-    return handleResponse<ResearchKnowledgeResponse>(res);
-  },
-
-  async getStatements(paperId?: string, type?: string): Promise<StatementResponse[]> {
-    const params = new URLSearchParams();
-    if (paperId) params.append('paper_id', paperId);
-    if (type) params.append('type', type);
-    const res = await fetch(`${API_BASE}/statements?${params.toString()}`);
-    return handleResponse<StatementResponse[]>(res);
-  },
-
-  async getEvidenceDetail(statementId: string): Promise<EvidenceDetail> {
-    const res = await fetch(`${API_BASE}/evidence/${statementId}`);
-    return handleResponse<EvidenceDetail>(res);
-  },
-
-  async getGaps(status?: string): Promise<GapResponse[]> {
-    const params = new URLSearchParams();
-    if (status) params.append('status', status);
-    const res = await fetch(`${API_BASE}/gaps?${params.toString()}`);
-    return handleResponse<GapResponse[]>(res);
-  },
-
-  async getGapDetail(gapId: string): Promise<GapResponse> {
-    const res = await fetch(`${API_BASE}/gaps/${gapId}`);
-    return handleResponse<GapResponse>(res);
-  },
-
-  async discoverGaps(): Promise<{ status: string; gaps_discovered: number }> {
-    const res = await fetch(`${API_BASE}/gaps/discover`, { method: 'POST' });
-    return handleResponse(res);
-  },
-
-  async getOpportunities(): Promise<OpportunityResponse[]> {
+  /**
+   * Lists all opportunities generated in the completed run with lifecycle mappings.
+   */
+  async getOpportunities(): Promise<OpportunitySummary[]> {
     const res = await fetch(`${API_BASE}/opportunities`);
-    return handleResponse<OpportunityResponse[]>(res);
+    return handleResponse<OpportunitySummary[]>(res);
   },
 
-  async getOpportunityDetail(opportunityId: string): Promise<OpportunityResponse> {
-    const res = await fetch(`${API_BASE}/opportunities/${opportunityId}`);
-    return handleResponse<OpportunityResponse>(res);
-  },
-
+  /**
+   * Fetches the 16-section opportunity proposal report.
+   */
   async getOpportunityReport(opportunityId: string): Promise<OpportunityReport> {
     const res = await fetch(`${API_BASE}/opportunities/${opportunityId}/report`);
     return handleResponse<OpportunityReport>(res);
   },
 
-  async generateOpportunity(gapId: string): Promise<OpportunityResponse> {
-    const res = await fetch(`${API_BASE}/opportunities/generate/${gapId}`, { method: 'POST' });
-    return handleResponse<OpportunityResponse>(res);
+  /**
+   * Fetches chronological temporal evidence linked to this opportunity.
+   */
+  async getOpportunityEvidence(opportunityId: string): Promise<OpportunityEvidenceItem[]> {
+    const res = await fetch(`${API_BASE}/opportunities/${opportunityId}/evidence`);
+    return handleResponse<OpportunityEvidenceItem[]>(res);
+  },
+
+  /**
+   * Fetches recorded lifecycle state transition history.
+   */
+  async getOpportunityHistory(opportunityId: string): Promise<OpportunityHistoryItem[]> {
+    const res = await fetch(`${API_BASE}/opportunities/${opportunityId}/history`);
+    return handleResponse<OpportunityHistoryItem[]>(res);
+  },
+
+  /**
+   * Lists all corpus papers with baseline vs later-evaluation classifications.
+   */
+  async getPapers(): Promise<PaperItem[]> {
+    const res = await fetch(`${API_BASE}/papers`);
+    return handleResponse<PaperItem[]>(res);
+  },
+
+  /**
+   * Fetches a single paper's details.
+   */
+  async getPaper(paperId: string): Promise<PaperItem> {
+    const res = await fetch(`${API_BASE}/papers/${paperId}`);
+    return handleResponse<PaperItem>(res);
+  },
+
+  /**
+   * Fetches extracted statements, optionally filtered by paper or statement type.
+   */
+  async getStatements(paperId?: string, type?: string): Promise<StatementItem[]> {
+    if (paperId) {
+      const res = await fetch(`${API_BASE}/papers/${paperId}/statements`);
+      return handleResponse<StatementItem[]>(res);
+    }
+    const params = new URLSearchParams();
+    if (type && type !== 'ALL') params.append('type', type);
+    const res = await fetch(`${API_BASE}/statements?${params.toString()}`);
+    return handleResponse<StatementItem[]>(res);
+  },
+
+  /**
+   * Retrieves full evidence trace for a statement (paper, section, page, passage snippet).
+   */
+  async getEvidenceDetail(statementId: string): Promise<EvidenceDetail> {
+    const res = await fetch(`${API_BASE}/evidence/${statementId}`);
+    return handleResponse<EvidenceDetail>(res);
+  },
+
+  /**
+   * Retrieves research gaps.
+   */
+  async getGaps(): Promise<GapItem[]> {
+    const res = await fetch('/api/gaps');
+    return handleResponse<GapItem[]>(res);
+  },
+
+  /**
+   * Retrieves a specific research gap by ID.
+   */
+  async getGap(gapId: string): Promise<GapItem> {
+    const res = await fetch(`/api/gaps/${gapId}`);
+    return handleResponse<GapItem>(res);
+  },
+
+  /**
+   * Verifies backend connectivity truthfully.
+   */
+  async checkBackendConnection(): Promise<boolean> {
+    try {
+      const res = await fetch('/api/health', { method: 'GET' });
+      return res.ok;
+    } catch {
+      return false;
+    }
   },
 };

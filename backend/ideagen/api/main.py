@@ -11,11 +11,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func, select
+import json
+import logging
 import uuid
 import datetime
 import tempfile
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from ideagen.db import (
     get_db,
@@ -30,11 +34,14 @@ from ideagen.db import (
     OpportunityEvidence,
     OpportunityHistory,
     ResearchOpportunityRecord,
+    ExperimentMetadataRecord,
     SQLAlchemyPersistenceLayer,
 )
 from ideagen.ingestion.models import PaperCreateDTO, PaperDocumentCreateDTO, SourceType
 from ideagen.api.schema import (
     WorkspaceStatsDTO,
+    RunMetadataDTO,
+    RunMetadataCountsDTO,
     PaperResponseDTO,
     EvidenceDetailDTO,
     StatementResponseDTO,
@@ -43,6 +50,8 @@ from ideagen.api.schema import (
     OpportunityEvolveResponse,
     OpportunityHistoryDTO,
     OpportunityEvidenceDTO,
+    OpportunityListItemDTO,
+
     OpportunityEvolutionEventDTO,
     PaperEvolutionErrorDTO,
     DemoScenarioResponse,
@@ -50,10 +59,21 @@ from ideagen.api.schema import (
     SearchResponse,
     AnalyzeRequest,
     SearchResultPaper,
+    OpenAlexIngestRequest,
+    OpenAlexIngestResponse,
+    OpenAlexPaperResultDTO,
+    OpenAlexSearchResponse,
 )
 from ideagen.api.demo_service import build_demo_scenario
-from ideagen.ingestion.search import ArxivSearchProvider
-from ideagen.ingestion.pdf import ManualPDFIngestionService, PDFExtractionError
+from ideagen.ingestion.search import ArxivSearchProvider, OpenAlexSearchProvider, OpenAlexSearchError
+from ideagen.ingestion.pdf import ManualPDFIngestionService, PDFExtractionError, DuplicateDocumentError
+from ideagen.ingestion.openalex_ingestion import (
+    OpenAlexPaperIngestionService,
+    IngestionStatus,
+    EvolutionHookStatus,
+)
+from ideagen.ingestion.parser import PaperNormalizer
+from ideagen.core.config import get_settings
 from ideagen.understanding import PaperUnderstandingPipeline, ResearchKnowledgeResponseDTO
 from ideagen.discovery import SemanticGapDiscoveryPipeline, ResearchGapResponseDTO, GapStatus
 from ideagen.discovery.vector_index import StatementVectorIndex
@@ -77,11 +97,14 @@ app.add_middleware(
 # ── Health Check ─────────────────────────────────────────────────────────
 
 @app.get("/api/health")
+@app.get("/api/v1/health")
+@app.get("/health")
 def health_check(db: Session = Depends(get_db)):
-    """Verifies application health and PostgreSQL database connectivity."""
+    """Verifies application health and database connectivity."""
     try:
         db.execute(text("SELECT 1"))
-        return {"status": "healthy", "database": "postgresql_connected"}
+        dialect = db.bind.dialect.name if db.bind else "unknown"
+        return {"status": "healthy", "database": f"{dialect}_connected"}
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Database connection error: {e}")
 
@@ -124,12 +147,132 @@ def get_workspace_stats(db: Session = Depends(get_db)):
     )
 
 
+# ── Run Overview & Metadata Endpoints ────────────────────────────────────
+
+def get_configured_temporal_cutoff(db: Session) -> Optional[datetime.date]:
+    """Helper to load configured baseline temporal cutoff date from experiment metadata."""
+    meta = db.query(ExperimentMetadataRecord).filter(ExperimentMetadataRecord.key == "configuration_fingerprint").first()
+    if meta and meta.value:
+        try:
+            fp = json.loads(meta.value)
+            tc = fp.get("temporal_cutoff")
+            if tc:
+                return datetime.date.fromisoformat(str(tc))
+        except Exception:
+            pass
+    return None
+
+
+def resolve_paper_temporal_role(
+    paper_date: Optional[datetime.date],
+    temporal_cutoff_date: Optional[datetime.date],
+) -> tuple[Optional[str], Optional[bool]]:
+    """Derives (temporal_role, is_baseline) for a paper against the configured baseline cutoff."""
+    if paper_date is None:
+        return ("UNDATED", None)
+    if temporal_cutoff_date is None:
+        return ("DATED", None)
+    if paper_date <= temporal_cutoff_date:
+        return ("BASELINE", True)
+    return ("LATER_EVALUATION", False)
+
+
+@app.get("/api/v1/run-metadata", response_model=RunMetadataDTO)
+@app.get("/api/v1/run_metadata", response_model=RunMetadataDTO)
+@app.get("/api/run-metadata", response_model=RunMetadataDTO)
+def get_run_metadata(db: Session = Depends(get_db)):
+    """Retrieves experiment configuration fingerprint, cutoff rules, and pipeline metrics for the completed run."""
+    meta_rows = db.query(ExperimentMetadataRecord).all()
+    meta_map = {row.key: row.value for row in meta_rows}
+
+    fingerprint = None
+    if "configuration_fingerprint" in meta_map:
+        try:
+            fingerprint = json.loads(meta_map["configuration_fingerprint"])
+        except Exception as e:
+            logger.warning(f"Failed to parse configuration_fingerprint: {e}")
+
+    screening_report = None
+    if "relevance_screening_report" in meta_map:
+        try:
+            screening_report = json.loads(meta_map["relevance_screening_report"])
+        except Exception as e:
+            logger.warning(f"Failed to parse relevance_screening_report: {e}")
+
+    discovery_comp = None
+    if "stage_3_discovery_completion" in meta_map:
+        try:
+            discovery_comp = json.loads(meta_map["stage_3_discovery_completion"])
+        except Exception as e:
+            logger.warning(f"Failed to parse stage_3_discovery_completion: {e}")
+
+    baseline_cutoff = fingerprint.get("temporal_cutoff") if fingerprint else None
+    eval_cutoffs = fingerprint.get("stage_5_cutoffs") if fingerprint else None
+    stage_5_enabled = bool(fingerprint.get("enable_stage_5", False)) if fingerprint else False
+    stage_5_batch_window_days = fingerprint.get("stage_5_batch_window_days") if fingerprint else None
+
+    # Pipeline limitations note
+    metric_interpretation_note = (
+        "Stage 5 measures descriptive temporal evolution counts (relationships, transitions, status distribution). "
+        "These values represent event volume and trajectory progression, not empirical accuracy, precision, or research "
+        "validity without human-annotated gold standard data."
+    )
+
+    total_papers = db.query(func.count(Paper.id)).scalar() or 0
+    total_statements = db.query(func.count(ResearchStatement.id)).scalar() or 0
+    total_gaps = db.query(func.count(ResearchGap.id)).scalar() or 0
+    total_opps = db.query(func.count(ResearchOpportunityRecord.id)).scalar() or 0
+
+    cutoff_dt = get_configured_temporal_cutoff(db)
+    if cutoff_dt:
+        baseline_papers = db.query(func.count(Paper.id)).filter(Paper.publication_date <= cutoff_dt).scalar() or 0
+        later_papers = db.query(func.count(Paper.id)).filter(Paper.publication_date > cutoff_dt).scalar() or 0
+    else:
+        baseline_papers = total_papers
+        later_papers = 0
+
+    lifecycle_opps = db.query(func.count(Opportunity.id)).scalar() or 0
+    evidence_records = db.query(func.count(OpportunityEvidence.id)).scalar() or 0
+    history_records = db.query(func.count(OpportunityHistory.id)).scalar() or 0
+
+    counts = RunMetadataCountsDTO(
+        papers=total_papers,
+        baseline_papers=baseline_papers,
+        later_evaluation_papers=later_papers,
+        statements=total_statements,
+        research_gaps=total_gaps,
+        opportunities=total_opps,
+        lifecycle_opportunities=lifecycle_opps,
+        evidence_records=evidence_records,
+        history_records=history_records,
+    )
+
+    return RunMetadataDTO(
+        run_fingerprint=fingerprint,
+        baseline_cutoff=baseline_cutoff,
+        evaluation_cutoffs=eval_cutoffs,
+        stage_5_enabled=stage_5_enabled,
+        stage_5_batch_window_days=stage_5_batch_window_days,
+        relevance_screening=screening_report,
+        discovery_completion=discovery_comp,
+        total_papers=total_papers,
+        total_statements=total_statements,
+        total_gaps=total_gaps,
+        total_opportunities=total_opps,
+        counts=counts,
+        # Observed, not assumed: this request has just read the counts above from the database.
+        database_status=f"CONNECTED ({db.get_bind().dialect.name})",
+        metric_interpretation_note=metric_interpretation_note,
+    )
+
+
 # ── Literature & Papers Endpoints ────────────────────────────────────────
 
 @app.get("/api/v1/papers", response_model=List[PaperResponseDTO])
 @app.get("/api/papers", response_model=List[PaperResponseDTO])
 def list_papers(limit: int = 50, offset: int = 0, db: Session = Depends(get_db)):
     """Lists real persisted papers from PostgreSQL with pagination and metadata."""
+    cutoff_dt = get_configured_temporal_cutoff(db)
     papers = db.query(Paper).order_by(Paper.created_at.desc()).offset(offset).limit(limit).all()
 
     results: List[PaperResponseDTO] = []
@@ -146,6 +289,7 @@ def list_papers(limit: int = 50, offset: int = 0, db: Session = Depends(get_db))
         knowledge_status = "ANALYZED" if p.research_knowledge else "UNANALYZED"
         pub_date_str = str(p.publication_date) if p.publication_date else None
         created_str = p.created_at.isoformat() if p.created_at else None
+        temporal_role, is_baseline = resolve_paper_temporal_role(p.publication_date, cutoff_dt)
 
         results.append(
             PaperResponseDTO(
@@ -161,6 +305,8 @@ def list_papers(limit: int = 50, offset: int = 0, db: Session = Depends(get_db))
                 passage_count=passage_count,
                 knowledge_status=knowledge_status,
                 content_hash=content_hash,
+                temporal_role=temporal_role,
+                is_baseline=is_baseline,
             )
         )
     return results
@@ -173,6 +319,7 @@ def get_paper_details(paper_id: uuid.UUID, db: Session = Depends(get_db)):
     if not p:
         raise HTTPException(status_code=404, detail=f"Paper {paper_id} not found")
 
+    cutoff_dt = get_configured_temporal_cutoff(db)
     doc_count = len(p.documents) if p.documents else 0
     passage_count = 0
     content_hash = None
@@ -185,6 +332,7 @@ def get_paper_details(paper_id: uuid.UUID, db: Session = Depends(get_db)):
     knowledge_status = "ANALYZED" if p.research_knowledge else "UNANALYZED"
     pub_date_str = str(p.publication_date) if p.publication_date else None
     created_str = p.created_at.isoformat() if p.created_at else None
+    temporal_role, is_baseline = resolve_paper_temporal_role(p.publication_date, cutoff_dt)
 
     return PaperResponseDTO(
         id=p.id,
@@ -199,9 +347,13 @@ def get_paper_details(paper_id: uuid.UUID, db: Session = Depends(get_db)):
         passage_count=passage_count,
         knowledge_status=knowledge_status,
         content_hash=content_hash,
+        temporal_role=temporal_role,
+        is_baseline=is_baseline,
     )
 
 
+
+@app.get("/api/v1/documents/{document_id}/passages")
 @app.get("/api/documents/{document_id}/passages")
 def get_document_passages(document_id: uuid.UUID, db: Session = Depends(get_db)):
     """Retrieves all deterministic passages for an ingested document."""
@@ -222,6 +374,7 @@ def get_document_passages(document_id: uuid.UUID, db: Session = Depends(get_db))
     ]
 
 
+@app.post("/api/v1/papers/{paper_id}/understand", response_model=ResearchKnowledgeResponseDTO)
 @app.post("/api/papers/{paper_id}/understand", response_model=ResearchKnowledgeResponseDTO)
 def understand_paper(paper_id: uuid.UUID, db: Session = Depends(get_db)):
     """Triggers AI paper understanding pipeline on an ingested paper."""
@@ -235,6 +388,7 @@ def understand_paper(paper_id: uuid.UUID, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Understanding pipeline failed: {str(e)}")
 
 
+@app.get("/api/v1/papers/{paper_id}/knowledge", response_model=ResearchKnowledgeResponseDTO)
 @app.get("/api/papers/{paper_id}/knowledge", response_model=ResearchKnowledgeResponseDTO)
 def get_paper_knowledge(paper_id: uuid.UUID, db: Session = Depends(get_db)):
     """Retrieves extracted research knowledge for a paper."""
@@ -246,6 +400,7 @@ def get_paper_knowledge(paper_id: uuid.UUID, db: Session = Depends(get_db)):
     return knowledge
 
 
+@app.get("/api/v1/papers/{paper_id}/statements", response_model=List[StatementResponseDTO])
 @app.get("/api/papers/{paper_id}/statements", response_model=List[StatementResponseDTO])
 def get_paper_statements(paper_id: uuid.UUID, db: Session = Depends(get_db)):
     """Retrieves all grounded research statements with provenance for a paper."""
@@ -267,6 +422,7 @@ def get_paper_statements(paper_id: uuid.UUID, db: Session = Depends(get_db)):
             section=s.section,
             confidence=s.confidence,
             created_at=s.created_at.isoformat() if s.created_at else None,
+            passage_text=s.passage.text if s.passage else None,
         )
         for s in statements
     ]
@@ -304,13 +460,16 @@ def search_statements(
                 section=s.section,
                 confidence=s.confidence,
                 created_at=created_str,
+                passage_text=s.passage.text if s.passage else None,
             )
         )
     return results
 
 
+
 # ── Research Gaps Endpoints ──────────────────────────────────────────────
 
+@app.post("/api/v1/gaps/discover", response_model=List[ResearchGapResponseDTO])
 @app.post("/api/gaps/discover", response_model=List[ResearchGapResponseDTO])
 def discover_research_gaps(
     cutoff_date: Optional[str] = Query(None, description="Optional ISO publication cutoff date YYYY-MM-DD"),
@@ -437,47 +596,8 @@ def generate_opportunity_from_gap(
     try:
         opp_dto = pipeline.process_validated_gap(input_dto=input_dto, db_session=db)
     except Exception as e:
-        # If live LLM fails or is unconfigured, create an evidence-grounded validated draft record directly
-        from ideagen.generation.persistence import OpportunityPersistenceLayer
-        from ideagen.generation.models import FeasibilityAssessment, NoveltyAssessment, ResearchOpportunityDTO
-        p_layer = OpportunityPersistenceLayer(db)
-        model_name = getattr(llm, "model_name", "qwen3:8b")
-        embed_name = getattr(embedder, "model_name", "nomic-embed-text")
-        opp_dto = ResearchOpportunityDTO(
-            id=uuid.uuid4(),
-            gap_id=gap.id,
-            research_problem=gap.research_problem,
-            identified_gap=gap.gap_statement,
-            proposed_research_direction=f"Investigate adaptive constraint frameworks resolving: {gap.gap_statement}",
-            reasoning=f"Grounded evidence indicates recurring limitations ({'; '.join(gap.limitations[:2]) if gap.limitations else 'existing bottlenecks'}). Target problem: {gap.research_problem}",
-            technical_approach=f"Combine literature baselines with step-wise verification and continuous grounding checks.",
-            expected_contribution=f"Provides a potentially novel methodological framework for resolving {gap.research_problem} within the analyzed corpus.",
-            feasibility=FeasibilityAssessment(
-                required_data="Benchmark datasets from analyzed corpus",
-                required_compute="Standard 1x GPU workstation (RTX 4090)",
-                implementation_complexity="Moderate algorithmic complexity",
-                experimental_setup="Comparative evaluation against baseline papers",
-                feasibility_score=0.85,
-                summary="Feasible under standard academic computing resources.",
-            ),
-            novelty_assessment=NoveltyAssessment(
-                assessment="Potentially novel within the analyzed corpus",
-                reasoning="Distinct focus from prior indexed literature statements.",
-                differentiation="Directly targets identified gap constraints.",
-                confidence=0.85,
-            ),
-            confidence=gap.validation_confidence or 0.85,
-            supporting_statement_ids=stmt_ids,
-            supporting_paper_ids=paper_ids,
-            prior_art_statement_ids=[],
-            status=OpportunityStatus.VALIDATED,
-            generation_model=model_name,
-            validation_model=model_name,
-            embedding_model=embed_name,
-            refinement_iteration_count=0,
-            pipeline_version="v1.0",
-        )
-        p_layer.save_opportunity(opp_dto)
+        logger.error(f"Opportunity generation failed for gap {gap_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Opportunity generation failed: {e}")
 
     report_service = OpportunityReportService(db)
     report = report_service.generate_opportunity_report(opp_dto.id)
@@ -486,13 +606,23 @@ def generate_opportunity_from_gap(
     return report
 
 
-@app.get("/api/v1/opportunities", response_model=List[Dict[str, Any]])
-@app.get("/api/opportunities", response_model=List[Dict[str, Any]])
+@app.get("/api/v1/opportunities", response_model=List[OpportunityListItemDTO])
+@app.get("/api/opportunities", response_model=List[OpportunityListItemDTO])
 def list_opportunities(db: Session = Depends(get_db)):
     """Lists all validated research opportunities persisted in PostgreSQL."""
     opps = db.query(ResearchOpportunityRecord).order_by(ResearchOpportunityRecord.created_at.desc()).all()
-    return [
-        {
+    results = []
+    for o in opps:
+        lifecycle_id = str(o.lifecycle_opportunity.id) if o.lifecycle_opportunity else None
+        lifecycle_status = o.lifecycle_opportunity.status if o.lifecycle_opportunity else None
+        lifecycle_conf = o.lifecycle_opportunity.confidence if o.lifecycle_opportunity else None
+        ev_count = 0
+        if o.lifecycle_opportunity:
+            ev_count = db.query(func.count(OpportunityEvidence.id)).filter(
+                OpportunityEvidence.opportunity_id == o.lifecycle_opportunity.id
+            ).scalar() or 0
+
+        results.append({
             "id": str(o.id),
             "gap_id": str(o.gap_id),
             "research_problem": o.research_problem,
@@ -503,9 +633,13 @@ def list_opportunities(db: Session = Depends(get_db)):
             "created_at": o.created_at.isoformat() if o.created_at else None,
             "supporting_statement_count": len(o.supporting_statement_ids or []),
             "supporting_paper_count": len(o.supporting_paper_ids or []),
-        }
-        for o in opps
-    ]
+            "lifecycle_opportunity_id": lifecycle_id,
+            "lifecycle_status": lifecycle_status,
+            "lifecycle_confidence": lifecycle_conf,
+            "evidence_count": ev_count,
+        })
+    return results
+
 
 
 @app.get("/api/v1/opportunities/{opportunity_id}/report", response_model=OpportunityReportDTO)
@@ -527,22 +661,35 @@ def get_relationship_classifier() -> RelationshipClassifier:
     return RelationshipClassifier(provider=provider)
 
 
-def resolve_lifecycle_opportunity(opportunity_id: uuid.UUID, db: Session) -> Opportunity:
-    """Resolves an Opportunity lifecycle entity from an Opportunity ID or bridged ResearchOpportunityRecord ID."""
+def resolve_lifecycle_opportunity(
+    opportunity_id: uuid.UUID,
+    db: Session,
+    create_if_missing: bool = False,
+) -> Optional[Opportunity]:
+    """Resolves an Opportunity lifecycle entity from an Opportunity ID or bridged ResearchOpportunityRecord ID.
+
+    By default (create_if_missing=False), strictly read-only: does not create or flush lifecycle entities.
+    """
+    # 1. Match directly on Opportunity.id
     opp = db.query(Opportunity).filter(Opportunity.id == opportunity_id).first()
     if opp is not None:
         return opp
 
-    # Check if opportunity_id belongs to a ResearchOpportunityRecord
+    # 2. Match on Opportunity.research_opportunity_id
+    opp = db.query(Opportunity).filter(Opportunity.research_opportunity_id == opportunity_id).first()
+    if opp is not None:
+        return opp
+
+    # 3. Check if opportunity_id belongs to a ResearchOpportunityRecord
     rec = db.query(ResearchOpportunityRecord).filter(ResearchOpportunityRecord.id == opportunity_id).first()
     if rec is not None:
-        from ideagen.opportunity.bridge import OpportunityBridgeService
-        bridge = OpportunityBridgeService(db)
-        opp = bridge.bridge_opportunity(rec)
-        if opp is not None:
-            return opp
+        if create_if_missing:
+            from ideagen.opportunity.bridge import OpportunityBridgeService
+            bridge = OpportunityBridgeService(db)
+            return bridge.bridge_opportunity(rec)
+        return None
 
-    raise HTTPException(status_code=404, detail=f"Opportunity {opportunity_id} not found.")
+    return None
 
 
 @app.post("/api/v1/opportunities/{opportunity_id}/evolve", response_model=OpportunityEvolveResponse)
@@ -554,7 +701,9 @@ def evolve_opportunity(
     classifier: RelationshipClassifier = Depends(get_relationship_classifier),
 ):
     """Evolves an opportunity's lifecycle status using independently verified paper evidence."""
-    opp = resolve_lifecycle_opportunity(opportunity_id, db)
+    opp = resolve_lifecycle_opportunity(opportunity_id, db, create_if_missing=True)
+    if opp is None:
+        raise HTTPException(status_code=404, detail=f"Opportunity {opportunity_id} not found.")
     initial_status = opp.status
 
     if not req.paper_ids:
@@ -570,6 +719,23 @@ def evolve_opportunity(
             norm_cutoff = normalize_cutoff_date(req.cutoff_date)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid cutoff date: {e}")
+
+    # Lower temporal bound: only papers published on/after the opportunity existed can be
+    # evolution evidence (same rule as incremental post-ingestion evolution).
+    from ideagen.opportunity.incremental import get_opportunity_effective_creation_date
+    opp_date = get_opportunity_effective_creation_date(opp)
+
+    if norm_cutoff is not None:
+        # Ensure the opportunity itself existed at or before the requested cutoff
+        if opp_date is not None:
+            if opp_date > norm_cutoff:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Opportunity {opportunity_id} was created on {opp_date.isoformat()}, "
+                        f"which is after the requested cutoff date {norm_cutoff.isoformat()}."
+                    ),
+                )
 
     # Validate paper existence
     papers = db.query(Paper).filter(Paper.id.in_(req.paper_ids)).all()
@@ -599,13 +765,16 @@ def evolve_opportunity(
             skipped_count += 1
             continue
 
-        if norm_cutoff is not None:
+        if norm_cutoff is not None or opp_date is not None:
             if p.publication_date is None:
                 skipped_count += 1
                 continue
-            if p.publication_date > norm_cutoff:
-                skipped_count += 1
-                continue
+        if norm_cutoff is not None and p.publication_date > norm_cutoff:
+            skipped_count += 1
+            continue
+        if opp_date is not None and p.publication_date < opp_date:
+            skipped_count += 1
+            continue
 
         eligible_papers.append(p)
 
@@ -621,7 +790,7 @@ def evolve_opportunity(
         integration = OpportunityClassificationIntegration(classifier, trans_service, db)
         evolution_service = OpportunityEvolutionService(integration)
 
-        start_date = datetime.date(1900, 1, 1)
+        start_date = opp_date if opp_date is not None else datetime.date(1900, 1, 1)
         end_date = norm_cutoff if norm_cutoff is not None else datetime.date(2100, 1, 1)
         batch = TemporalBatch(
             batch_id=f"evolve_{uuid.uuid4().hex[:8]}",
@@ -680,7 +849,13 @@ def evolve_opportunity(
 @app.get("/api/opportunities/{opportunity_id}/history", response_model=List[OpportunityHistoryDTO])
 def get_opportunity_history(opportunity_id: uuid.UUID, db: Session = Depends(get_db)):
     """Retrieves persisted lifecycle history in chronological order."""
-    opp = resolve_lifecycle_opportunity(opportunity_id, db)
+    opp = resolve_lifecycle_opportunity(opportunity_id, db, create_if_missing=False)
+    if opp is None:
+        rec = db.query(ResearchOpportunityRecord).filter(ResearchOpportunityRecord.id == opportunity_id).first()
+        if rec is not None:
+            return []
+        raise HTTPException(status_code=404, detail=f"Opportunity {opportunity_id} not found.")
+
     histories = (
         db.query(OpportunityHistory)
         .filter(OpportunityHistory.opportunity_id == opp.id)
@@ -705,7 +880,13 @@ def get_opportunity_history(opportunity_id: uuid.UUID, db: Session = Depends(get
 @app.get("/api/opportunities/{opportunity_id}/evidence", response_model=List[OpportunityEvidenceDTO])
 def get_opportunity_evidence(opportunity_id: uuid.UUID, db: Session = Depends(get_db)):
     """Retrieves persisted evidence records linked to the opportunity."""
-    opp = resolve_lifecycle_opportunity(opportunity_id, db)
+    opp = resolve_lifecycle_opportunity(opportunity_id, db, create_if_missing=False)
+    if opp is None:
+        rec = db.query(ResearchOpportunityRecord).filter(ResearchOpportunityRecord.id == opportunity_id).first()
+        if rec is not None:
+            return []
+        raise HTTPException(status_code=404, detail=f"Opportunity {opportunity_id} not found.")
+
     evidences = (
         db.query(OpportunityEvidence)
         .filter(OpportunityEvidence.opportunity_id == opp.id)
@@ -722,6 +903,21 @@ def get_opportunity_evidence(opportunity_id: uuid.UUID, db: Session = Depends(ge
     for psg in passages:
         passage_map.setdefault(psg.paper_id, []).append(psg)
 
+    # Load Stage 5 cutoffs from experiment_metadata if present to derive batch/cutoff windows
+    meta_fp = db.query(ExperimentMetadataRecord).filter(ExperimentMetadataRecord.key == "configuration_fingerprint").first()
+    stage_5_cutoffs: List[datetime.date] = []
+    if meta_fp and meta_fp.value:
+        try:
+            fp_data = json.loads(meta_fp.value)
+            for c in fp_data.get("stage_5_cutoffs") or []:
+                try:
+                    stage_5_cutoffs.append(datetime.date.fromisoformat(str(c)))
+                except Exception:
+                    pass
+            stage_5_cutoffs.sort()
+        except Exception:
+            pass
+
     from ideagen.opportunity.service import is_evidence_grounded_for_paper
 
     results = []
@@ -730,12 +926,31 @@ def get_opportunity_evidence(opportunity_id: uuid.UUID, db: Session = Depends(ge
         p_passages = passage_map.get(ev.paper_id, [])
         is_verified = is_evidence_grounded_for_paper(ev, p, p_passages) if p else False
 
+        pub_date = p.publication_date if p else None
+        pub_date_str = str(pub_date) if pub_date else None
+        batch_id = p.batch_id if p and p.batch_id else None
+        eval_cutoff = None
+        if pub_date and stage_5_cutoffs:
+            for idx, c in enumerate(stage_5_cutoffs):
+                if pub_date <= c:
+                    eval_cutoff = str(c)
+                    if not batch_id:
+                        batch_id = f"batch_{idx}_{c}"
+                    break
+            if not eval_cutoff:
+                eval_cutoff = str(stage_5_cutoffs[-1])
+                if not batch_id:
+                    batch_id = f"batch_{len(stage_5_cutoffs)-1}_{stage_5_cutoffs[-1]}"
+
         results.append(
             OpportunityEvidenceDTO(
                 id=ev.id,
                 opportunity_id=ev.opportunity_id,
                 paper_id=ev.paper_id,
                 paper_title=p.title if p and p.title else None,
+                paper_publication_date=pub_date_str,
+                batch_id=batch_id,
+                evaluation_cutoff=eval_cutoff,
                 relationship=ev.evidence_type,
                 confidence=None,
                 supporting_text=ev.supporting_text,
@@ -744,6 +959,7 @@ def get_opportunity_evidence(opportunity_id: uuid.UUID, db: Session = Depends(ge
             )
         )
     return results
+
 
 
 @app.get("/api/v1/evidence/{statement_id}", response_model=EvidenceDetailDTO)
@@ -772,6 +988,202 @@ def get_evidence_detail(statement_id: uuid.UUID, db: Session = Depends(get_db)):
         page_end=stmt.page_end or (passage.page_end if passage else None),
         passage_text=passage.text if passage else None,
     )
+
+
+# ── OpenAlex Paper Ingestion Endpoint (Stage 6A) ──────────────────────────
+
+@app.post("/api/v1/papers/ingest/openalex", response_model=OpenAlexIngestResponse)
+@app.post("/api/papers/ingest/openalex", response_model=OpenAlexIngestResponse)
+def ingest_openalex_paper(
+    req: OpenAlexIngestRequest,
+    db: Session = Depends(get_db),
+):
+    """Ingests a research paper from OpenAlex by Work ID or DOI.
+
+    Deterministic ID resolution:
+    - If both 'openalex_id' and 'doi' are provided, 'openalex_id' takes precedence as the
+      primary canonical OpenAlex identifier. If lookup by 'openalex_id' returns no match,
+      the endpoint falls back to 'doi'.
+    - If neither identifier is provided, raises HTTP 400.
+    - If provided identifiers cannot be normalized, raises HTTP 400.
+
+    Persistence and evolution:
+    - Constructs OpenAlexPaperIngestionService with request-scoped SQLAlchemy session and persistence layer.
+    - Post-ingestion evolution runs only when enabled in system configuration
+      (IDEAGEN_ENABLE_POST_INGESTION_EVOLUTION, default off). A request can opt out with
+      'enable_evolution=false' but cannot enable it when the server disables it. Each run classifies
+      at most IDEAGEN_POST_INGESTION_EVOLUTION_MAX_CANDIDATES eligible opportunities.
+    - Preserves fail-closed NO_PDF metadata-only fallback if open-access PDF is absent, inaccessible, or invalid.
+    - Rejects duplicate papers gracefully without creating orphaned or partial records.
+    """
+    raw_oa_id = req.openalex_id.strip() if req.openalex_id else None
+    raw_doi = req.doi.strip() if req.doi else None
+
+    if not raw_oa_id and not raw_doi:
+        raise HTTPException(
+            status_code=400,
+            detail="Either 'openalex_id' or 'doi' must be provided.",
+        )
+
+    def _is_valid_openalex_id(raw: Optional[str]) -> bool:
+        if not raw:
+            return False
+        norm = PaperNormalizer.normalize_openalex_id(raw)
+        return norm is not None and norm.startswith("W") and norm[1:].isdigit()
+
+    def _is_valid_doi(raw: Optional[str]) -> bool:
+        if not raw:
+            return False
+        norm = PaperNormalizer.normalize_doi(raw)
+        return norm is not None and norm.startswith("10.") and "/" in norm
+
+    valid_oa = _is_valid_openalex_id(raw_oa_id)
+    valid_doi = _is_valid_doi(raw_doi)
+
+    if raw_oa_id and not valid_oa and not valid_doi:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid OpenAlex ID format: '{raw_oa_id}'. Must be a valid OpenAlex ID (e.g. 'W123456789') or URL.",
+        )
+    if raw_doi and not valid_doi and not valid_oa:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid DOI format: '{raw_doi}'. Must be a valid DOI (e.g. '10.1234/...').",
+        )
+    if not valid_oa and not valid_doi:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid identifier could be extracted from the request.",
+        )
+
+    norm_oa_id = PaperNormalizer.normalize_openalex_id(raw_oa_id) if valid_oa else None
+    norm_doi = PaperNormalizer.normalize_doi(raw_doi) if valid_doi else None
+
+    search_provider = OpenAlexSearchProvider(raise_on_error=True)
+    results = []
+    lookup_term = None
+
+    try:
+        # Deterministic precedence: openalex_id first, fallback to doi
+        if norm_oa_id:
+            lookup_term = norm_oa_id
+            results = search_provider.search(norm_oa_id, limit=1)
+
+        if not results and norm_doi:
+            lookup_term = f"https://doi.org/{norm_doi}"
+            results = search_provider.search(lookup_term, limit=1)
+    except Exception as search_err:
+        logger.error(f"OpenAlex metadata lookup error for {lookup_term}: {search_err}", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Upstream OpenAlex service error during metadata lookup: {search_err}",
+        )
+
+    if not results or not results[0].raw_metadata:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Paper not found in OpenAlex for identifier: {lookup_term or norm_oa_id or norm_doi}",
+        )
+
+    work = results[0].raw_metadata
+    persistence = SQLAlchemyPersistenceLayer(db)
+
+    # A request may opt out of evolution, but cannot enable it when the server disables it:
+    # evolution makes one synchronous LLM call per candidate opportunity.
+    evolution_allowed = bool(get_settings().enable_post_ingestion_evolution)
+    if req.enable_evolution and not evolution_allowed:
+        logger.info("Ignoring enable_evolution=true: post-ingestion evolution is disabled by server configuration.")
+    run_evolution = evolution_allowed and (req.enable_evolution is not False)
+
+    service = OpenAlexPaperIngestionService(
+        persistence=persistence,
+        auto_evolve=run_evolution,
+    )
+
+    try:
+        res = service.ingest_work(work)
+    except DuplicateDocumentError as dup_err:
+        existing_paper_id = None
+        if norm_oa_id and hasattr(persistence, "get_paper_id_by_source_id"):
+            existing_paper_id = persistence.get_paper_id_by_source_id(SourceType.OPENALEX_API.value, norm_oa_id)
+        if not existing_paper_id and norm_doi and hasattr(persistence, "get_paper_id_by_doi"):
+            existing_paper_id = persistence.get_paper_id_by_doi(norm_doi)
+        if not existing_paper_id and hasattr(persistence, "get_document_by_hash"):
+            import re
+            m = re.search(r"content hash ([a-f0-9]+)", str(dup_err))
+            if m:
+                doc = persistence.get_document_by_hash(m.group(1))
+                if doc:
+                    existing_paper_id = doc.paper_id
+        return OpenAlexIngestResponse(
+            paper_id=existing_paper_id,
+            source_id=work.get("id") or norm_oa_id or "UNKNOWN",
+            status=IngestionStatus.SKIPPED_DUPLICATE,
+            has_pdf=False,
+            document_id=None,
+            passage_count=0,
+            error_message=str(dup_err),
+            batch_id="UNKNOWN",
+            doi=norm_doi or PaperNormalizer.normalize_doi(work.get("doi")),
+            evolution_status=EvolutionHookStatus.SKIPPED if service.auto_evolve else EvolutionHookStatus.DISABLED,
+        )
+    except Exception as e:
+        logger.error(f"OpenAlex ingestion failed for work {work.get('id')}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"OpenAlex ingestion pipeline error: {str(e)}",
+        )
+
+    return OpenAlexIngestResponse(
+        paper_id=res.paper_id,
+        source_id=res.source_id,
+        status=res.status,
+        has_pdf=res.has_pdf,
+        document_id=res.document_id,
+        passage_count=res.passage_count,
+        error_message=res.error_message,
+        batch_id=res.batch_id,
+        doi=res.doi,
+        evolution_status=res.evolution_status,
+        evolution_result=_format_evolution_result(res.evolution_result),
+    )
+
+
+def _format_evolution_result(evo_res: Any) -> Optional[Dict[str, Any]]:
+    """Safely formats IncrementalEvolutionResult or error dict into json-serializable dict."""
+    if evo_res is None:
+        return None
+    if isinstance(evo_res, dict):
+        return evo_res
+    if hasattr(evo_res, "paper_id") and hasattr(evo_res, "run_status"):
+        return {
+            "paper_id": str(evo_res.paper_id),
+            "run_status": evo_res.run_status.value if hasattr(evo_res.run_status, "value") else str(evo_res.run_status),
+            "paper_title": getattr(evo_res, "paper_title", None),
+            "publication_date": evo_res.publication_date.isoformat() if getattr(evo_res, "publication_date", None) else None,
+            "candidate_count": getattr(evo_res, "candidate_count", 0),
+            "evaluated_count": getattr(evo_res, "evaluated_count", 0),
+            "skipped_count": getattr(evo_res, "skipped_count", 0),
+            "grounding_rejected_count": getattr(evo_res, "grounding_rejected_count", 0),
+            "failed_count": getattr(evo_res, "failed_count", 0),
+            "outcomes": [
+                {
+                    "opportunity_id": str(o.opportunity_id),
+                    "status": o.status.value if hasattr(o.status, "value") else str(o.status),
+                    "initial_status": o.initial_status.value if hasattr(o.initial_status, "value") and o.initial_status else (str(o.initial_status) if o.initial_status else None),
+                    "final_status": o.final_status.value if hasattr(o.final_status, "value") and o.final_status else (str(o.final_status) if o.final_status else None),
+                    "relationship": o.relationship.value if hasattr(o.relationship, "value") and o.relationship else (str(o.relationship) if o.relationship else None),
+                    "state_changed": o.state_changed,
+                    "evidence_id": str(o.evidence_id) if o.evidence_id else None,
+                    "history_id": str(o.history_id) if o.history_id else None,
+                    "skip_reason": o.skip_reason,
+                    "error_message": o.error_message,
+                }
+                for o in getattr(evo_res, "outcomes", [])
+            ],
+            "error": getattr(evo_res, "error", None),
+        }
+    return None
 
 
 # ── PDF Upload & Demo Endpoints (Preserved for compatibility) ─────────────
@@ -907,6 +1319,107 @@ def search_papers(q: str, limit: int = 10):
     provider = ArxivSearchProvider()
     results = provider.search(q, limit)
     return SearchResponse(query=q, source="ARXIV", count=len(results), papers=[r.model_dump() for r in results])
+
+
+@app.get("/api/v1/search/openalex", response_model=OpenAlexSearchResponse)
+@app.get("/api/search/openalex", response_model=OpenAlexSearchResponse)
+def search_openalex_papers(
+    query: Optional[str] = Query(None, description="Topic, title, keywords, OpenAlex ID, or DOI"),
+    q: Optional[str] = Query(None, description="Alternative alias for query"),
+    limit: int = Query(10, description="Maximum number of results to return (1-100)"),
+    start_date: Optional[str] = Query(None, description="Filter papers published on or after ISO date YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="Filter papers published on or before ISO date YYYY-MM-DD"),
+):
+    """Searches scientific literature using the OpenAlex Works API.
+
+    Returns structured metadata including canonical work ID, DOI, title,
+    authors, publication date, abstract, open-access status, PDF URL, and citation count.
+    Does not persist results or trigger paper ingestion.
+    """
+    search_term = (query if query is not None else (q if q is not None else "")).strip()
+    if not search_term:
+        raise HTTPException(
+            status_code=400,
+            detail="Search query cannot be empty. Please provide 'query' or 'q'.",
+        )
+
+    if limit < 1 or limit > 100:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid limit: {limit}. Must be between 1 and 100.",
+        )
+
+    parsed_start = None
+    parsed_end = None
+    if start_date is not None and start_date.strip():
+        try:
+            parsed_start = datetime.date.fromisoformat(start_date.strip())
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid start_date format: '{start_date}'. Expected ISO format YYYY-MM-DD.",
+            )
+
+    if end_date is not None and end_date.strip():
+        try:
+            parsed_end = datetime.date.fromisoformat(end_date.strip())
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid end_date format: '{end_date}'. Expected ISO format YYYY-MM-DD.",
+            )
+
+    if parsed_start and parsed_end and parsed_start > parsed_end:
+        raise HTTPException(
+            status_code=400,
+            detail=f"start_date ({start_date}) cannot be later than end_date ({end_date}).",
+        )
+
+    try:
+        provider = OpenAlexSearchProvider(raise_on_error=True)
+        results = provider.search(
+            query=search_term,
+            limit=limit,
+            start_date=start_date.strip() if start_date else None,
+            end_date=end_date.strip() if end_date else None,
+        )
+    except OpenAlexSearchError as e:
+        logger.error(f"Upstream OpenAlex search error for '{search_term}': {e}", exc_info=True)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Upstream OpenAlex service error: {e}",
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error during OpenAlex search for '{search_term}': {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal search error: {e}",
+        )
+
+    paper_dtos = [
+        OpenAlexPaperResultDTO(
+            id=r.id,
+            doi=r.doi,
+            title=r.title,
+            authors=r.authors or [],
+            publication_year=r.publication_year,
+            publication_date=r.publication_date,
+            abstract=r.abstract or "",
+            is_oa=r.is_oa,
+            pdf_url=r.pdf_url,
+            landing_page_url=r.url,
+            citation_count=r.citation_count,
+        )
+        for r in results
+    ]
+
+    return OpenAlexSearchResponse(
+        query=search_term,
+        source="OPENALEX",
+        count=len(paper_dtos),
+        total_count=getattr(provider, "last_total_count", None),
+        papers=paper_dtos,
+    )
 
 
 @app.post("/api/search/analyze", response_model=DemoScenarioResponse)

@@ -17,7 +17,7 @@ def test_paper(session):
         title="Test Paper",
         publication_date=date(2023, 1, 1),
         batch_id="batch1",
-        abstract="",
+        abstract="Sample abstract text with supporting and addressing evidence for senior research opportunities.",
         authors=[],
         referenced_works=[],
         raw_metadata={}
@@ -43,7 +43,12 @@ def test_transition_open_to_strengthened(session, test_opportunity, test_paper):
     service = OpportunityTransitionService(session)
     
     # 1. OPEN + SUPPORTS -> STRENGTHENED
-    service.apply_relationship(test_opportunity.id, test_paper.id, OpportunityRelationship.SUPPORTS)
+    service.apply_relationship(
+        test_opportunity.id,
+        test_paper.id,
+        OpportunityRelationship.SUPPORTS,
+        evidence_excerpt="supporting and addressing evidence"
+    )
     session.commit()
     
     session.refresh(test_opportunity)
@@ -63,7 +68,12 @@ def test_transition_open_to_strengthened(session, test_opportunity, test_paper):
 
 def test_transition_open_to_partially_addressed(session, test_opportunity, test_paper):
     service = OpportunityTransitionService(session)
-    service.apply_relationship(test_opportunity.id, test_paper.id, OpportunityRelationship.ADDRESSES)
+    service.apply_relationship(
+        test_opportunity.id,
+        test_paper.id,
+        OpportunityRelationship.ADDRESSES,
+        evidence_excerpt="supporting and addressing evidence"
+    )
     session.commit()
     session.refresh(test_opportunity)
     assert test_opportunity.status == OpportunityStatus.PARTIALLY_ADDRESSED.value
@@ -72,7 +82,12 @@ def test_transition_strengthened_to_partially_addressed(session, test_opportunit
     test_opportunity.status = OpportunityStatus.STRENGTHENED.value
     session.commit()
     service = OpportunityTransitionService(session)
-    service.apply_relationship(test_opportunity.id, test_paper.id, OpportunityRelationship.ADDRESSES)
+    service.apply_relationship(
+        test_opportunity.id,
+        test_paper.id,
+        OpportunityRelationship.ADDRESSES,
+        evidence_excerpt="supporting and addressing evidence"
+    )
     session.commit()
     session.refresh(test_opportunity)
     assert test_opportunity.status == OpportunityStatus.PARTIALLY_ADDRESSED.value
@@ -81,7 +96,12 @@ def test_transition_resolved_to_resolved(session, test_opportunity, test_paper):
     test_opportunity.status = OpportunityStatus.RESOLVED.value
     session.commit()
     service = OpportunityTransitionService(session)
-    service.apply_relationship(test_opportunity.id, test_paper.id, OpportunityRelationship.ADDRESSES)
+    service.apply_relationship(
+        test_opportunity.id,
+        test_paper.id,
+        OpportunityRelationship.ADDRESSES,
+        evidence_excerpt="supporting and addressing evidence"
+    )
     session.commit()
     session.refresh(test_opportunity)
     assert test_opportunity.status == OpportunityStatus.RESOLVED.value
@@ -94,7 +114,12 @@ def test_noop_strengthened_supports(session, test_opportunity, test_paper):
     test_opportunity.status = OpportunityStatus.STRENGTHENED.value
     session.commit()
     service = OpportunityTransitionService(session)
-    service.apply_relationship(test_opportunity.id, test_paper.id, OpportunityRelationship.SUPPORTS)
+    service.apply_relationship(
+        test_opportunity.id,
+        test_paper.id,
+        OpportunityRelationship.SUPPORTS,
+        evidence_excerpt="supporting and addressing evidence"
+    )
     session.commit()
     session.refresh(test_opportunity)
     assert test_opportunity.status == OpportunityStatus.STRENGTHENED.value
@@ -122,20 +147,40 @@ def test_noop_relationship(session, test_opportunity, test_paper):
 def test_nonexistent_opportunity(session, test_paper):
     service = OpportunityTransitionService(session)
     with pytest.raises(ValueError, match="Opportunity .* not found."):
-        service.apply_relationship(uuid.uuid4(), test_paper.id, OpportunityRelationship.SUPPORTS)
+        service.apply_relationship(
+            uuid.uuid4(),
+            test_paper.id,
+            OpportunityRelationship.SUPPORTS,
+            evidence_excerpt="supporting and addressing evidence"
+        )
 
 def test_nonexistent_paper(session, test_opportunity):
     service = OpportunityTransitionService(session)
     with pytest.raises(ValueError, match="Paper .* not found."):
-        service.apply_relationship(test_opportunity.id, uuid.uuid4(), OpportunityRelationship.SUPPORTS)
+        service.apply_relationship(
+            test_opportunity.id,
+            uuid.uuid4(),
+            OpportunityRelationship.SUPPORTS,
+            evidence_excerpt="supporting and addressing evidence"
+        )
 
 def test_duplicate_paper_evidence(session, test_opportunity, test_paper):
     service = OpportunityTransitionService(session)
-    service.apply_relationship(test_opportunity.id, test_paper.id, OpportunityRelationship.SUPPORTS)
+    service.apply_relationship(
+        test_opportunity.id,
+        test_paper.id,
+        OpportunityRelationship.SUPPORTS,
+        evidence_excerpt="supporting and addressing evidence"
+    )
     session.commit()
     
     with pytest.raises(ValueError, match="Evidence from Paper .* already exists"):
-        service.apply_relationship(test_opportunity.id, test_paper.id, OpportunityRelationship.ADDRESSES)
+        service.apply_relationship(
+            test_opportunity.id,
+            test_paper.id,
+            OpportunityRelationship.ADDRESSES,
+            evidence_excerpt="supporting and addressing evidence"
+        )
         
 def test_atomicity(session, test_opportunity, test_paper, monkeypatch):
     service = OpportunityTransitionService(session)
@@ -149,7 +194,12 @@ def test_atomicity(session, test_opportunity, test_paper, monkeypatch):
     monkeypatch.setattr(session, "flush", fake_flush)
     
     try:
-        service.apply_relationship(test_opportunity.id, test_paper.id, OpportunityRelationship.SUPPORTS)
+        service.apply_relationship(
+            test_opportunity.id,
+            test_paper.id,
+            OpportunityRelationship.SUPPORTS,
+            evidence_excerpt="supporting and addressing evidence"
+        )
         session.commit()
     except Exception:
         session.rollback()

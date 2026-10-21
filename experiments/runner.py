@@ -21,7 +21,7 @@ from pathlib import Path
 import sys
 import tempfile
 import time
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Sequence
 import uuid
 
 # Ensure backend/ is in pythonpath
@@ -50,6 +50,7 @@ from ideagen.db.models import (
     Opportunity,
     OpportunityEvidence,
     OpportunityHistory,
+    ExperimentMetadataRecord,
 )
 from ideagen.db.persistence import SQLAlchemyPersistenceLayer
 from ideagen.ingestion.pdf import ManualPDFIngestionService, PDFExtractionError
@@ -59,14 +60,22 @@ from ideagen.discovery.pipeline import SemanticGapDiscoveryPipeline
 from ideagen.discovery.vector_index import StatementVectorIndex
 from ideagen.discovery.embeddings import EmbeddingProvider, get_default_embedding_provider
 from ideagen.discovery.models import GapStatus
-from ideagen.discovery.temporal import normalize_cutoff_date
+from ideagen.discovery.temporal import normalize_cutoff_date, is_paper_eligible
+from ideagen.discovery.screening import (
+    RelevanceScreeningService,
+    ScreeningReport,
+    DEFAULT_SCREENING_THRESHOLD,
+    DEFAULT_SCREENING_MIN_PAPERS,
+    compute_screening_input_signature,
+    validate_screening_report_for_reuse,
+)
 from ideagen.llm.provider import LLMProvider
 from ideagen.llm import get_default_llm_provider
 from ideagen.generation.pipeline import ResearchOpportunityPipeline
 from ideagen.generation.models import ResearchOpportunityInputDTO
 from ideagen.reporting.report_service import OpportunityReportService
 from ideagen.opportunity.models import OpportunityRelationship, OpportunityStatus
-from ideagen.opportunity.classifier import RelationshipClassifier
+from ideagen.opportunity.classifier import RelationshipClassifier, RELATIONSHIP_CLASSIFIER_PROMPT_VERSION
 from ideagen.opportunity.service import OpportunityTransitionService
 from ideagen.opportunity.integration import OpportunityClassificationIntegration
 from ideagen.opportunity.temporal import (
@@ -79,14 +88,6 @@ from ideagen.db.session import configure_sqlite_foreign_keys
 from ideagen.ingestion.preflight import run_corpus_preflight, CorpusPreflightReport
 
 logger = logging.getLogger(__name__)
-
-
-class ExperimentMetadataRecord(Base):
-    """Stores key-value experiment metadata such as configuration fingerprints."""
-    __tablename__ = "experiment_metadata"
-
-    key: Mapped[str] = mapped_column(String(128), primary_key=True)
-    value: Mapped[str] = mapped_column(Text)
 
 
 def compute_configuration_fingerprint(
@@ -108,6 +109,13 @@ def compute_configuration_fingerprint(
     stage_5_cutoffs: Optional[List[str]] = None,
     stage_5_chunk_size: Optional[int] = None,
     stage_5_max_retries: Optional[int] = None,
+    stage_5_max_passages: Optional[int] = None,
+    stage_5_max_total_words: Optional[int] = None,
+    stage_5_max_abstract_chars: Optional[int] = None,
+    screening_topic: Optional[str] = None,
+    screening_max_papers: Optional[int] = None,
+    screening_min_papers: Optional[int] = None,
+    screening_threshold: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Generates a canonical configuration dictionary of all material run settings."""
     return {
@@ -128,11 +136,24 @@ def compute_configuration_fingerprint(
         },
         "max_refinement_iterations": int(max_refinement_iterations),
         "temporal_cutoff": str(temporal_cutoff) if temporal_cutoff else None,
+        "relevance_screening": {
+            "enabled": bool(screening_topic and str(screening_topic).strip()),
+            "topic": str(screening_topic).strip() if (screening_topic and str(screening_topic).strip()) else None,
+            "max_papers": int(screening_max_papers) if screening_max_papers is not None else None,
+            "min_papers": int(screening_min_papers) if screening_min_papers is not None else 0,
+            "threshold": float(screening_threshold) if screening_threshold is not None else 0.5,
+        },
         "enable_stage_5": bool(enable_stage_5),
         "stage_5_batch_window_days": stage_5_batch_window_days,
         "stage_5_cutoffs": [str(c) for c in stage_5_cutoffs] if stage_5_cutoffs else None,
         "stage_5_chunk_size": stage_5_chunk_size,
         "stage_5_max_retries": stage_5_max_retries,
+        "stage_5_passage_selection": {
+            "max_passages": int(stage_5_max_passages if stage_5_max_passages is not None else 10),
+            "max_total_words": int(stage_5_max_total_words if stage_5_max_total_words is not None else 2000),
+            "max_abstract_chars": int(stage_5_max_abstract_chars if stage_5_max_abstract_chars is not None else 2000),
+        } if enable_stage_5 else None,
+        "stage_5_classifier_prompt_version": RELATIONSHIP_CLASSIFIER_PROMPT_VERSION if enable_stage_5 else None,
     }
 
 
@@ -151,6 +172,10 @@ def compare_fingerprints(stored: Dict[str, Any], current: Dict[str, Any]) -> Lis
         )
 
     # 2. Embedding
+    if stored.get("embedding_provider") != current.get("embedding_provider"):
+        mismatches.append(
+            f"Embedding provider mismatch: stored='{stored.get('embedding_provider')}', current='{current.get('embedding_provider')}'"
+        )
     if stored.get("embedding_model") != current.get("embedding_model"):
         mismatches.append(
             f"Embedding model mismatch: stored='{stored.get('embedding_model')}', current='{current.get('embedding_model')}'"
@@ -228,8 +253,90 @@ def compare_fingerprints(stored: Dict[str, Any], current: Dict[str, Any]) -> Lis
             mismatches.append(
                 f"Stage 5 chunk size mismatch: stored={stored.get('stage_5_chunk_size')}, current={current.get('stage_5_chunk_size')}"
             )
+        # Stage 5 passage selection limits (with backward-compatible fallback for legacy fingerprints)
+        stored_ps = stored.get("stage_5_passage_selection")
+        current_ps = current.get("stage_5_passage_selection")
+        # Fingerprints written before these limits were recorded used a hard-coded selector of
+        # 10 passages / 2000 words and passed the full paper abstract (no character bound).
+        legacy_ps = {"max_passages": 10, "max_total_words": 2000, "max_abstract_chars": None}
+        if stored_ps is None:
+            stored_ps = legacy_ps
+        if current_ps is None:
+            current_ps = legacy_ps
+        for k in ("max_passages", "max_total_words", "max_abstract_chars"):
+            if stored_ps.get(k) != current_ps.get(k):
+                mismatches.append(
+                    f"Stage 5 {k} mismatch: stored={stored_ps.get(k)}, current={current_ps.get(k)}"
+                )
+        # Classifier prompt version: fingerprints written before the version was recorded used "v1".
+        stored_pv = stored.get("stage_5_classifier_prompt_version") or "v1"
+        current_pv = current.get("stage_5_classifier_prompt_version") or "v1"
+        if stored_pv != current_pv:
+            mismatches.append(
+                f"Stage 5 classifier prompt version mismatch: stored={stored_pv}, current={current_pv}"
+            )
+
+    # 10. Relevance screening settings (with backward-compatible fallback for legacy fingerprints)
+    stored_rs = stored.get("relevance_screening")
+    current_rs = current.get("relevance_screening")
+    if stored_rs is None:
+        stored_rs = {"enabled": False, "topic": None, "max_papers": None, "min_papers": 0, "threshold": 0.5}
+    if current_rs is None:
+        current_rs = {"enabled": False, "topic": None, "max_papers": None, "min_papers": 0, "threshold": 0.5}
+
+    if stored_rs.get("enabled") != current_rs.get("enabled"):
+        mismatches.append(
+            f"Relevance screening enabled mismatch: stored={stored_rs.get('enabled')}, current={current_rs.get('enabled')}"
+        )
+    elif current_rs.get("enabled"):
+        if stored_rs.get("topic") != current_rs.get("topic"):
+            mismatches.append(
+                f"Relevance screening topic mismatch: stored={stored_rs.get('topic')!r}, current={current_rs.get('topic')!r}"
+            )
+        if stored_rs.get("threshold") != current_rs.get("threshold"):
+            mismatches.append(
+                f"Relevance screening threshold mismatch: stored={stored_rs.get('threshold')}, current={current_rs.get('threshold')}"
+            )
+        if stored_rs.get("max_papers") != current_rs.get("max_papers"):
+            mismatches.append(
+                f"Relevance screening max_papers mismatch: stored={stored_rs.get('max_papers')}, current={current_rs.get('max_papers')}"
+            )
+        if stored_rs.get("min_papers") != current_rs.get("min_papers"):
+            mismatches.append(
+                f"Relevance screening min_papers mismatch: stored={stored_rs.get('min_papers')}, current={current_rs.get('min_papers')}"
+            )
 
     return mismatches
+
+
+STAGE_3_DISCOVERY_COMPLETION_KEY = "stage_3_discovery_completion"
+
+
+def compute_discovery_input_signature(
+    statement_ids: Sequence[Union[str, uuid.UUID]],
+    cutoff_date: Optional[Union[datetime.date, datetime.datetime, str]] = None,
+) -> Dict[str, Any]:
+    """Generates a deterministic signature for the exact Stage 3 discovery input set."""
+    norm_cutoff_str = None
+    if cutoff_date is not None:
+        if isinstance(cutoff_date, (datetime.date, datetime.datetime)):
+            norm_cutoff_str = cutoff_date.isoformat().split("T")[0]
+        else:
+            norm_cutoff_str = str(cutoff_date).split("T")[0]
+
+    sorted_ids = sorted(str(sid) for sid in statement_ids)
+    ids_hash = hashlib.sha256("\n".join(sorted_ids).encode("utf-8")).hexdigest()
+
+    canonical_dict = {
+        "temporal_cutoff": norm_cutoff_str,
+        "statement_count": len(sorted_ids),
+        "statement_ids_hash": ids_hash,
+    }
+    sig_hash = hashlib.sha256(
+        json.dumps(canonical_dict, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    canonical_dict["signature_hash"] = sig_hash
+    return canonical_dict
 
 
 def is_opportunity_available_at_cutoff(
@@ -448,6 +555,14 @@ class ControlledExperimentRunner:
         stage_5_backoff_factor: float = 0.5,
         stage_5_timeout: Optional[float] = None,
         stage_5_chunk_size: Optional[int] = None,
+        stage_5_max_passages: int = 10,
+        stage_5_max_total_words: int = 2000,
+        stage_5_max_abstract_chars: int = 2000,
+        screening_topic: Optional[str] = None,
+        screening_max_papers: Optional[int] = None,
+        screening_min_papers: int = DEFAULT_SCREENING_MIN_PAPERS,
+        screening_threshold: float = DEFAULT_SCREENING_THRESHOLD,
+        screening_only: bool = False,
     ):
         self.llm_provider = llm_provider
         self.embedding_provider = embedding_provider
@@ -470,6 +585,19 @@ class ControlledExperimentRunner:
         self.stage_5_backoff_factor = stage_5_backoff_factor
         self.stage_5_timeout = stage_5_timeout
         self.stage_5_chunk_size = stage_5_chunk_size
+        self.stage_5_max_passages = max(1, int(stage_5_max_passages))
+        self.stage_5_max_total_words = max(1, int(stage_5_max_total_words))
+        self.stage_5_max_abstract_chars = max(1, int(stage_5_max_abstract_chars))
+        self.screening_topic = screening_topic.strip() if (screening_topic and screening_topic.strip()) else None
+        self.screening_max_papers = int(screening_max_papers) if screening_max_papers is not None else None
+        self.screening_min_papers = max(0, int(screening_min_papers)) if screening_min_papers is not None else 0
+        self.screening_threshold = float(screening_threshold) if screening_threshold is not None else DEFAULT_SCREENING_THRESHOLD
+        self.screening_only = bool(screening_only)
+        if self.screening_max_papers is not None and self.screening_min_papers is not None:
+            if self.screening_max_papers < self.screening_min_papers:
+                raise ValueError(
+                    f"screening_max_papers ({self.screening_max_papers}) cannot be less than screening_min_papers ({self.screening_min_papers})"
+                )
 
     def _resolve_manifest(self, input_dir: Path) -> List[PaperInputMetadata]:
         """Discovers PDF files in input_dir and matches against optional manifest."""
@@ -706,6 +834,13 @@ class ControlledExperimentRunner:
             stage_5_cutoffs=[str(c) for c in self.stage_5_cutoffs] if self.stage_5_cutoffs else None,
             stage_5_chunk_size=self.stage_5_chunk_size,
             stage_5_max_retries=self.stage_5_max_retries,
+            stage_5_max_passages=self.stage_5_max_passages,
+            stage_5_max_total_words=self.stage_5_max_total_words,
+            stage_5_max_abstract_chars=self.stage_5_max_abstract_chars,
+            screening_topic=self.screening_topic,
+            screening_max_papers=self.screening_max_papers,
+            screening_min_papers=self.screening_min_papers,
+            screening_threshold=self.screening_threshold,
         )
 
         # 4. Check configuration consistency against existing database
@@ -831,6 +966,7 @@ class ControlledExperimentRunner:
             "papers_input": [p.to_dict() for p in paper_inputs],
             "paper_statuses": paper_statuses,
             "ingestion": {},
+            "relevance_screening": {},
             "understanding": {},
             "discovery": {},
             "opportunities": {},
@@ -936,6 +1072,180 @@ class ControlledExperimentRunner:
                 metrics["discovery"]["status"] = "SKIPPED_NO_PAPERS"
                 return self._finalize_result(True, metrics, session)
 
+            # ── STAGE 1.5: RELEVANCE SCREENING (DETERMINISTIC EMBEDDING) ──
+            screening_start = time.time()
+            selected_discovery_paper_ids: Optional[Set[uuid.UUID]] = None
+
+            if self.screening_topic:
+                logger.info(
+                    f"Initiating relevance screening for topic: '{self.screening_topic}' "
+                    f"(threshold={self.screening_threshold}, min={self.screening_min_papers}, max={self.screening_max_papers})"
+                )
+
+                # Identify candidates for discovery: pre-cutoff papers only
+                candidates: List[Tuple[Paper, List[PaperPassage], str]] = []
+                for p_info in ingested_papers:
+                    p_id_str = p_info["paper_id"]
+                    if not p_id_str:
+                        continue
+                    db_p = session.query(Paper).filter(Paper.id == uuid.UUID(p_id_str)).first()
+                    if not db_p:
+                        continue
+
+                    # Temporal cutoff filtering for discovery screening
+                    if self.temporal_cutoff is not None and not is_paper_eligible(db_p, self.temporal_cutoff):
+                        logger.info(
+                            f"Paper '{p_info['filename']}' ({db_p.publication_date}) is post-cutoff ({self.temporal_cutoff}); "
+                            "skipping discovery screening (preserved for Stage 5)."
+                        )
+                        continue
+
+                    passages = (
+                        session.query(PaperPassage)
+                        .filter(PaperPassage.paper_id == db_p.id)
+                        .order_by(PaperPassage.passage_index.asc())
+                        .all()
+                    )
+                    candidates.append((db_p, passages, p_info["filename"]))
+
+                # Compute current screening input signature
+                current_screening_signature = compute_screening_input_signature(
+                    candidates=candidates,
+                    topic=self.screening_topic,
+                    threshold=self.screening_threshold,
+                    min_papers=self.screening_min_papers,
+                    max_papers=self.screening_max_papers,
+                    embedding_provider_name=embedder.__class__.__name__ if embedder else "None",
+                    embedding_model=resolved_embedder_name,
+                    embedding_dimension=resolved_dim,
+                    temporal_cutoff=self.temporal_cutoff,
+                )
+
+                # Check for existing screening report in DB metadata (for safe resumption)
+                meta_screening = (
+                    session.query(ExperimentMetadataRecord)
+                    .filter(ExperimentMetadataRecord.key == "relevance_screening_report")
+                    .first()
+                )
+                screening_report_dict = None
+                if meta_screening and meta_screening.value:
+                    try:
+                        stored_report_data = json.loads(meta_screening.value)
+                        is_valid, invalid_reason = validate_screening_report_for_reuse(
+                            stored_report=stored_report_data,
+                            current_signature=current_screening_signature,
+                            candidate_paper_ids=[c[0].id for c in candidates],
+                        )
+                        if is_valid:
+                            screening_report_dict = stored_report_data
+                            logger.info("Reusing verified prior relevance screening decisions from database metadata.")
+                        else:
+                            logger.info(
+                                f"Prior relevance screening decisions cannot be reused: {invalid_reason}. "
+                                "Recomputing relevance screening safely."
+                            )
+                            screening_report_dict = None
+                    except Exception as err:
+                        logger.warning(f"Failed to parse stored relevance screening report: {err}. Recomputing screening safely.")
+                        screening_report_dict = None
+
+                if not screening_report_dict:
+                    screening_service = RelevanceScreeningService(
+                        embedding_provider=embedder,
+                        threshold=self.screening_threshold,
+                        min_papers=self.screening_min_papers,
+                        max_papers=self.screening_max_papers,
+                    )
+                    try:
+                        report = screening_service.screen_papers(
+                            topic=self.screening_topic,
+                            candidates=candidates,
+                            input_signature=current_screening_signature,
+                        )
+                    except Exception as screen_err:
+                        # Fail closed on embedding or screening failure: do not silently process papers
+                        session.close()
+                        engine.dispose()
+                        err_msg = f"Relevance screening embedding failure: {screen_err}"
+                        logger.error(err_msg)
+                        metrics["error"] = err_msg
+                        metrics["relevance_screening"] = {"enabled": True, "error": str(screen_err)}
+                        self._checkpoint_metrics(metrics)
+                        return ExperimentResult(
+                            success=False,
+                            metrics=metrics,
+                            error=err_msg,
+                        )
+
+                    screening_report_dict = report.to_dict()
+                    session.merge(
+                        ExperimentMetadataRecord(
+                            key="relevance_screening_report",
+                            value=json.dumps(screening_report_dict),
+                        )
+                    )
+                    session.commit()
+
+                metrics["relevance_screening"] = screening_report_dict
+                metrics["timings_seconds"]["relevance_screening_total"] = round(time.time() - screening_start, 2)
+                self._checkpoint_metrics(metrics)
+
+                # Determine selected paper IDs
+                selected_discovery_paper_ids = set()
+                for r in screening_report_dict.get("ranked_papers", []):
+                    if r.get("decision", "").startswith("SELECTED"):
+                        selected_discovery_paper_ids.add(uuid.UUID(r["paper_id"]))
+                    else:
+                        paper_statuses[r["filename"]] = r["decision"]
+
+                # Mark post-cutoff papers retained for Stage 5
+                if self.temporal_cutoff is not None:
+                    for p_info in ingested_papers:
+                        p_id_str = p_info["paper_id"]
+                        if not p_id_str:
+                            continue
+                        db_p = session.query(Paper).filter(Paper.id == uuid.UUID(p_id_str)).first()
+                        if db_p and not is_paper_eligible(db_p, self.temporal_cutoff):
+                            paper_statuses[p_info["filename"]] = "POST_CUTOFF_RETAINED_FOR_STAGE_5"
+
+                selected_count = len(selected_discovery_paper_ids)
+                logger.info(
+                    f"Relevance screening completed: {selected_count} selected for discovery, "
+                    f"{screening_report_dict.get('excluded_count', 0)} excluded."
+                )
+
+                # Safeguard: if nothing qualifies and min_papers == 0, fail clearly before LLM extraction
+                if selected_count == 0 and self.screening_min_papers == 0:
+                    session.close()
+                    engine.dispose()
+                    err_msg = (
+                        f"Relevance screening qualification failure: 0 papers qualified for topic '{self.screening_topic}' "
+                        f"at threshold {self.screening_threshold} (min_papers=0). Halting before Stage 2 LLM extraction."
+                    )
+                    metrics["error"] = err_msg
+                    self._checkpoint_metrics(metrics)
+                    return ExperimentResult(
+                        success=False,
+                        metrics=metrics,
+                        error=err_msg,
+                    )
+
+                # Screening-only mode: rank papers, produce auditable report, and exit before Stage 2
+                if self.screening_only:
+                    logger.info("Screening-only mode active: exiting before Stage 2 LLM extraction.")
+                    metrics["understanding"]["status"] = "SKIPPED_SCREENING_ONLY"
+                    metrics["discovery"]["status"] = "SKIPPED_SCREENING_ONLY"
+                    metrics["opportunities"]["status"] = "SKIPPED_SCREENING_ONLY"
+                    if self.enable_stage_5:
+                        metrics["stage_5_evolution"]["status"] = "SKIPPED_SCREENING_ONLY"
+                    return self._finalize_result(True, metrics, session)
+
+            else:
+                metrics["relevance_screening"] = {
+                    "enabled": False,
+                    "reason": "No screening topic provided; screening disabled.",
+                }
+
             # ── STAGE 2: PAPER UNDERSTANDING (RESUMABLE & CHECKPOINTED) ──
             under_start = time.time()
             understanding_pipeline = PaperUnderstandingPipeline(
@@ -957,6 +1267,13 @@ class ControlledExperimentRunner:
                     continue
                 p_id = uuid.UUID(p_id_str)
                 fname = p_info["filename"]
+
+                # If screening is enabled, extract only papers selected for discovery
+                if selected_discovery_paper_ids is not None:
+                    if p_id not in selected_discovery_paper_ids:
+                        logger.info(f"Skipping Stage 2 understanding for paper '{fname}' (not selected for discovery).")
+                        continue
+
                 pu_start = time.time()
 
                 # Check existing understanding in DB
@@ -1088,6 +1405,14 @@ class ControlledExperimentRunner:
                     metrics["discovery"]["status"] = "SKIPPED_NO_STATEMENTS"
                     metrics["fatal_error"] = failure_reason
                     return self._finalize_result(False, metrics, session, error=failure_reason)
+            else:
+                eligible_stmts = all_stmts
+
+            eligible_stmt_ids = {s.id for s in eligible_stmts}
+            current_discovery_signature = compute_discovery_input_signature(
+                eligible_stmt_ids,
+                self.temporal_cutoff,
+            )
 
             # ── STAGE 3: SEMANTIC GAP DISCOVERY (DEDUPLICATED) ─────────────
             disc_start = time.time()
@@ -1096,48 +1421,82 @@ class ControlledExperimentRunner:
             rejected_gaps: List[Dict[str, Any]] = []
 
             if all_db_gaps:
-                stmt_ids_in_db = {s.id for s in all_stmts}
-                gap_evidence_valid = True
-                for g in all_db_gaps:
-                    ev_records = persistence.get_gap_evidence(g.id)
-                    if not ev_records or any(e.statement_id not in stmt_ids_in_db for e in ev_records):
-                        gap_evidence_valid = False
-                        break
+                completion_row = (
+                    session.query(ExperimentMetadataRecord)
+                    .filter(ExperimentMetadataRecord.key == STAGE_3_DISCOVERY_COMPLETION_KEY)
+                    .first()
+                )
+
+                if not completion_row or not completion_row.value:
+                    raise RuntimeError(
+                        "Cannot safely reuse existing research gaps: Stage 3 discovery was not marked complete "
+                        "in experiment metadata. The existing gaps in the database may be partial, interrupted, "
+                        "or from a legacy run without completion tracking. Please run with a clean database or specify a new --db-path."
+                    )
+
+                try:
+                    completion_data = json.loads(completion_row.value)
+                    if not isinstance(completion_data, dict) or completion_data.get("status") != "COMPLETED":
+                        raise ValueError("Completion record is invalid or not marked COMPLETED")
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Cannot safely reuse existing research gaps: Stage 3 discovery completion metadata is malformed: {e}. "
+                        "Please run with a clean database or specify a new --db-path."
+                    )
+
+                recorded_sig = completion_data.get("signature") or {}
+                recorded_hash = recorded_sig.get("signature_hash")
+                current_hash = current_discovery_signature.get("signature_hash")
+
+                if recorded_hash != current_hash:
+                    rec_cutoff = recorded_sig.get("temporal_cutoff")
+                    rec_count = recorded_sig.get("statement_count")
+                    cur_cutoff = current_discovery_signature.get("temporal_cutoff")
+                    cur_count = current_discovery_signature.get("statement_count")
+                    raise RuntimeError(
+                        f"Cannot safely reuse existing research gaps: Stage 3 discovery input signature mismatch "
+                        f"(recorded cutoff={rec_cutoff}, statements={rec_count} vs current cutoff={cur_cutoff}, statements={cur_count}). "
+                        "The existing gaps do not reflect the current discovery input corpus. "
+                        "Please run with a clean database or specify a new --db-path."
+                    )
 
                 newly_understood_in_this_run = any(not p.get("resumed_from_cache") for p in understood_papers)
-
-                if gap_evidence_valid and not newly_understood_in_this_run:
-                    logger.info(f"Reusing {len(all_db_gaps)} verified research gaps from existing database.")
-                    for g in all_db_gaps:
-                        ev_records = persistence.get_gap_evidence(g.id)
-                        p_ids = list({e.paper_id for e in ev_records})
-                        g_dict = {
-                            "gap_id": str(g.id),
-                            "gap_statement": g.gap_statement,
-                            "research_problem": g.research_problem,
-                            "status": g.status,
-                            "evidence_count": g.evidence_count,
-                            "distinct_supporting_papers_count": len(p_ids),
-                            "supporting_paper_ids": [str(pid) for pid in p_ids],
-                            "validation_confidence": g.validation_confidence,
-                            "validation_reasoning": g.validation_reasoning,
-                            "resumed_from_cache": True,
-                        }
-                        if g.status == GapStatus.VALIDATED.value or g.status == "VALIDATED":
-                            validated_gaps.append(g_dict)
-                        else:
-                            rejected_gaps.append(g_dict)
-                elif newly_understood_in_this_run:
+                if newly_understood_in_this_run:
                     raise RuntimeError(
                         "Cannot safely reuse existing research gaps: new statements were extracted in this run, "
                         "so existing gaps do not reflect the complete statement corpus. "
                         "Please run with a clean database or specify a new --db-path."
                     )
-                else:
-                    raise RuntimeError(
-                        "Cannot safely reuse existing research gaps: gap evidence records reference statements "
-                        "missing from current database. Refusing to mix inconsistent results."
-                    )
+
+                for g in all_db_gaps:
+                    ev_records = persistence.get_gap_evidence(g.id)
+                    if not ev_records or any(e.statement_id not in eligible_stmt_ids for e in ev_records):
+                        raise RuntimeError(
+                            "Cannot safely reuse existing research gaps: gap evidence records reference statements "
+                            "missing or ineligible under the current discovery cutoff. Refusing to mix inconsistent results. "
+                            "Please run with a clean database or specify a new --db-path."
+                        )
+
+                logger.info(f"Reusing {len(all_db_gaps)} verified research gaps from existing database.")
+                for g in all_db_gaps:
+                    ev_records = persistence.get_gap_evidence(g.id)
+                    p_ids = list({e.paper_id for e in ev_records})
+                    g_dict = {
+                        "gap_id": str(g.id),
+                        "gap_statement": g.gap_statement,
+                        "research_problem": g.research_problem,
+                        "status": g.status,
+                        "evidence_count": g.evidence_count,
+                        "distinct_supporting_papers_count": len(p_ids),
+                        "supporting_paper_ids": [str(pid) for pid in p_ids],
+                        "validation_confidence": g.validation_confidence,
+                        "validation_reasoning": g.validation_reasoning,
+                        "resumed_from_cache": True,
+                    }
+                    if g.status == GapStatus.VALIDATED.value or g.status == "VALIDATED":
+                        validated_gaps.append(g_dict)
+                    else:
+                        rejected_gaps.append(g_dict)
             else:
                 discovery_pipeline = SemanticGapDiscoveryPipeline(
                     persistence=persistence,
@@ -1172,7 +1531,34 @@ class ControlledExperimentRunner:
                     else:
                         rejected_gaps.append(g_dict)
 
+                # Atomically record discovery completion metadata
+                completion_payload = {
+                    "status": "COMPLETED",
+                    "completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "signature": current_discovery_signature,
+                    "candidate_gaps_count": len(all_db_gaps),
+                    "validated_gaps_count": len(validated_gaps),
+                    "rejected_gaps_count": len(rejected_gaps),
+                }
+                completion_record = (
+                    session.query(ExperimentMetadataRecord)
+                    .filter(ExperimentMetadataRecord.key == STAGE_3_DISCOVERY_COMPLETION_KEY)
+                    .first()
+                )
+                if completion_record:
+                    completion_record.value = json.dumps(completion_payload)
+                else:
+                    session.add(
+                        ExperimentMetadataRecord(
+                            key=STAGE_3_DISCOVERY_COMPLETION_KEY,
+                            value=json.dumps(completion_payload),
+                        )
+                    )
+                session.commit()
+
             metrics["discovery"] = {
+                "status": "COMPLETED",
+                "input_signature": current_discovery_signature,
                 "candidate_gaps_total": len(all_db_gaps),
                 "validated_gaps_count": len(validated_gaps),
                 "rejected_gaps_count": len(rejected_gaps),
@@ -1352,12 +1738,19 @@ class ControlledExperimentRunner:
                             logger.warning(f"Failed to bridge opportunity {rec.id} for Stage 5: {b_err}")
                     session.commit()
 
+                    classifier_input_limits = {
+                        "max_passages": self.stage_5_max_passages,
+                        "max_total_words": self.stage_5_max_total_words,
+                        "max_abstract_chars": self.stage_5_max_abstract_chars,
+                    }
+
                     all_opportunities = session.query(Opportunity).all()
                     if not all_opportunities:
                         logger.info("Stage 5: No opportunities available to evolve.")
                         metrics["stage_5_evolution"] = {
                             "status": "NO_OPPORTUNITIES",
                             "enabled": True,
+                            "classifier_input_limits": classifier_input_limits,
                             "batches_evaluated_count": 0,
                             "total_opportunities_evaluated": 0,
                             "total_events_count": 0,
@@ -1392,6 +1785,7 @@ class ControlledExperimentRunner:
                             metrics["stage_5_evolution"] = {
                                 "status": "NO_EVALUATION_BATCHES",
                                 "enabled": True,
+                                "classifier_input_limits": classifier_input_limits,
                                 "batches_evaluated_count": 0,
                                 "total_opportunities_evaluated": len(all_opportunities),
                                 "total_events_count": 0,
@@ -1414,7 +1808,14 @@ class ControlledExperimentRunner:
                                 backoff_factor=self.stage_5_backoff_factor,
                             )
                             transition_svc = OpportunityTransitionService(session)
-                            integration_svc = OpportunityClassificationIntegration(classifier, transition_svc, session)
+                            integration_svc = OpportunityClassificationIntegration(
+                                classifier=classifier,
+                                transition_service=transition_svc,
+                                session=session,
+                                max_passages=self.stage_5_max_passages,
+                                max_total_words=self.stage_5_max_total_words,
+                                max_abstract_chars=self.stage_5_max_abstract_chars,
+                            )
                             evolution_svc = OpportunityEvolutionService(integration_svc)
 
                             per_batch_metrics: List[Dict[str, Any]] = []
@@ -1502,10 +1903,12 @@ class ControlledExperimentRunner:
                                 }
                                 per_batch_metrics.append(batch_m)
                                 self._checkpoint_metrics(metrics)
+                                session.commit()
 
                             metrics["stage_5_evolution"] = {
                                 "status": "COMPLETED",
                                 "enabled": True,
+                                "classifier_input_limits": classifier_input_limits,
                                 "batches_evaluated_count": len(batches),
                                 "total_opportunities_evaluated": len(all_opportunities),
                                 "total_events_count": total_events,
@@ -1521,10 +1924,16 @@ class ControlledExperimentRunner:
                             self._checkpoint_metrics(metrics)
 
                 except Exception as s5_err:
+                    session.rollback()
                     logger.error(f"Stage 5 temporal evolution failed: {s5_err}")
                     metrics["stage_5_evolution"] = {
                         "status": "FAILED",
                         "enabled": True,
+                        "classifier_input_limits": {
+                            "max_passages": self.stage_5_max_passages,
+                            "max_total_words": self.stage_5_max_total_words,
+                            "max_abstract_chars": self.stage_5_max_abstract_chars,
+                        },
                         "error": str(s5_err),
                         "failures": [str(s5_err)],
                         "per_batch_metrics": per_batch_metrics if "per_batch_metrics" in locals() else [],
@@ -1542,6 +1951,7 @@ class ControlledExperimentRunner:
 
             metrics["timings_seconds"]["pipeline_wall_time_total"] = round(time.time() - start_time, 2)
 
+            session.commit()
             return self._finalize_result(True, metrics, session)
 
         except KeyboardInterrupt:
@@ -1668,6 +2078,31 @@ class ControlledExperimentRunner:
             f"- Papers Ingested: **{ingest.get('ingested_count', 0)}** (Reused: {ingest.get('reused_count', 0)}, Failed: {ingest.get('failed_count', 0)})",
             f"- Total Passages Created: **{ingest.get('total_passages_created', 0)}**",
             f"- Ingestion Wall Time: **{timings.get('ingestion_total', 'N/A')}s**",
+        ])
+
+        rs = metrics.get("relevance_screening", {})
+        if rs and rs.get("enabled"):
+            md.extend([
+                "",
+                "## 1.5 Relevance Screening (Deterministic Embedding)",
+                f"- **Topic**: `{rs.get('topic')}`",
+                f"- **Threshold**: `{rs.get('threshold')}` | **Min Papers**: `{rs.get('min_papers')}` | **Max Papers**: `{rs.get('max_papers')}`",
+                f"- **Candidate Papers**: **{rs.get('total_eligible_papers', 0)}** (Selected: **{rs.get('selected_count', 0)}**, Excluded: **{rs.get('excluded_count', 0)}**)",
+            ])
+            if rs.get("floor_warning"):
+                md.append(f"- **Warning**: *{rs.get('floor_warning')}*")
+            md.extend([
+                f"- **Interpretation**: *{rs.get('metric_interpretation_note', '')}*",
+                "",
+                "| Rank | Filename | Score | Decision | Floor Included | Reason |",
+                "| :--- | :--- | :--- | :--- | :--- | :--- |",
+            ])
+            for r in rs.get("ranked_papers", []):
+                md.append(
+                    f"| {r.get('rank')} | `{r.get('filename')}` | {r.get('score')} | `{r.get('decision')}` | {r.get('floor_included')} | {r.get('reason')} |"
+                )
+
+        md.extend([
             "",
             "## 2. Paper Understanding",
             f"- Papers Processed: **{under.get('understood_count', 0)}** (Resumed: {under.get('resumed_count', 0)})",
@@ -1756,6 +2191,14 @@ def main():
     parser.add_argument("--stage-5-max-retries", default=2, type=int, help="Maximum retries for Stage 5 LLM relationship classification")
     parser.add_argument("--stage-5-backoff-factor", default=0.5, type=float, help="Exponential backoff factor for Stage 5 retries")
     parser.add_argument("--stage-5-timeout", default=None, type=float, help="Per-call timeout for Stage 5 relationship classification")
+    parser.add_argument("--stage-5-max-passages", default=10, type=int, help="Maximum passages for Stage 5 relationship classification")
+    parser.add_argument("--stage-5-max-total-words", default=2000, type=int, help="Maximum total words in selected passages for Stage 5")
+    parser.add_argument("--stage-5-max-abstract-chars", default=2000, type=int, help="Maximum characters for paper abstract in Stage 5")
+    parser.add_argument("--screening-topic", default=None, type=str, help="Research question or topic for pre-extraction relevance screening")
+    parser.add_argument("--screening-max-papers", default=None, type=int, help="Maximum number of candidate papers selected by screening")
+    parser.add_argument("--screening-min-papers", default=DEFAULT_SCREENING_MIN_PAPERS, type=int, help="Minimum selection floor for screening")
+    parser.add_argument("--screening-threshold", default=DEFAULT_SCREENING_THRESHOLD, type=float, help="Similarity threshold for relevance screening")
+    parser.add_argument("--screening-only", action="store_true", default=False, help="Rank papers and produce auditable report, then exit before Stage 2")
     parser.add_argument("--preflight-only", action="store_true", default=False, help="Run offline corpus preflight report and exit")
 
     args = parser.parse_args()
@@ -1784,6 +2227,14 @@ def main():
         stage_5_backoff_factor=args.stage_5_backoff_factor,
         stage_5_timeout=args.stage_5_timeout,
         stage_5_chunk_size=args.stage_5_chunk_size,
+        stage_5_max_passages=args.stage_5_max_passages,
+        stage_5_max_total_words=args.stage_5_max_total_words,
+        stage_5_max_abstract_chars=args.stage_5_max_abstract_chars,
+        screening_topic=args.screening_topic,
+        screening_max_papers=args.screening_max_papers,
+        screening_min_papers=args.screening_min_papers,
+        screening_threshold=args.screening_threshold,
+        screening_only=args.screening_only,
     )
 
     result = runner.run(input_dir=args.input_dir)

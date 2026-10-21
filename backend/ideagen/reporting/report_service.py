@@ -156,13 +156,7 @@ class OpportunityReportService:
             if stmt.statement_type in {"METHOD", "METHODOLOGY", "BASELINE"}:
                 existing_approaches.append(stmt.statement_text)
 
-        if not existing_approaches:
-            for p in supporting_papers_list:
-                if p.abstract:
-                    existing_approaches.append(f"Baseline techniques from {p.title}: {p.abstract[:150]}...")
-
-        if not existing_approaches:
-            existing_approaches = ["Standard literature baselines and conventional architectures."]
+        # No template fallback: an empty list means no method statements support this opportunity.
 
         # 7. Why Existing Work Is Insufficient
         why_insufficient_parts = []
@@ -172,44 +166,42 @@ class OpportunityReportService:
             if stmt.statement_type == "LIMITATION":
                 why_insufficient_parts.append(stmt.statement_text)
 
-        why_insufficient_text = " ".join(why_insufficient_parts) if why_insufficient_parts else (
-            f"Existing methods suffer from unaddressed bottlenecks under '{gap_statement}', limiting recall and precision."
-        )
+        why_insufficient_text = " ".join(why_insufficient_parts) if why_insufficient_parts else None
 
         # 8. Feasibility DTO
         feasibility_dict = opportunity.feasibility or {}
+        # Values come from the stored (model-generated) assessment only; absent keys stay None.
         feasibility_dto = FeasibilityDTO(
-            required_data=feasibility_dict.get("required_data", "Standard benchmark datasets from corpus"),
-            required_compute=feasibility_dict.get("required_compute", "Standard GPU compute workstation"),
-            implementation_complexity=feasibility_dict.get("implementation_complexity", "Moderate implementation complexity"),
-            experimental_setup=feasibility_dict.get("experimental_setup", "Comparative benchmarking against corpus baselines"),
-            feasibility_score=feasibility_dict.get("feasibility_score", 0.8),
-            summary=feasibility_dict.get("summary", "Feasible under standard academic resources."),
+            required_data=feasibility_dict.get("required_data"),
+            required_compute=feasibility_dict.get("required_compute"),
+            implementation_complexity=feasibility_dict.get("implementation_complexity"),
+            experimental_setup=feasibility_dict.get("experimental_setup"),
+            feasibility_score=feasibility_dict.get("feasibility_score"),
+            summary=feasibility_dict.get("summary"),
         )
 
         # 9. Novelty Assessment DTO
         novelty_dict = opportunity.novelty_assessment or {}
         novelty_dto = NoveltyDTO(
-            assessment=sanitize_novelty_language(novelty_dict.get("assessment", "Potentially novel within the analyzed corpus")),
-            reasoning=sanitize_novelty_language(novelty_dict.get("reasoning", "")),
-            differentiation=sanitize_novelty_language(novelty_dict.get("differentiation", "")),
-            confidence=novelty_dict.get("confidence", 0.8),
+            assessment=sanitize_novelty_language(novelty_dict.get("assessment")),
+            reasoning=sanitize_novelty_language(novelty_dict.get("reasoning")),
+            differentiation=sanitize_novelty_language(novelty_dict.get("differentiation")),
+            confidence=novelty_dict.get("confidence"),
         )
 
         # 10. Prior Art Assessment DTO
         prior_art_dict = {
-            "assessment": novelty_dict.get("assessment", "LOW_OVERLAP"),
-            "reasoning": novelty_dict.get("reasoning", "No direct prior art overlap detected in corpus."),
-            "differentiation": novelty_dict.get("differentiation", "Differentiated research direction."),
-            "confidence": novelty_dict.get("confidence", 0.8),
+            "assessment": novelty_dict.get("assessment"),
+            "reasoning": novelty_dict.get("reasoning"),
+            "differentiation": novelty_dict.get("differentiation"),
+            "confidence": novelty_dict.get("confidence"),
         }
 
-        differentiation_text = novelty_dict.get("differentiation") or (
-            f"The proposed approach introduces dynamic constraints directly targeting '{gap_statement}', "
-            f"which is unaddressed in conventional literature baselines."
-        )
+        differentiation_text = novelty_dict.get("differentiation") or None
 
-        created_at_str = opportunity.created_at.isoformat() if opportunity.created_at else datetime.datetime.utcnow().isoformat()
+        created_at_str = opportunity.created_at.isoformat() if opportunity.created_at else datetime.datetime.now(datetime.timezone.utc).isoformat()
+        lifecycle_status = opportunity.lifecycle_opportunity.status if opportunity.lifecycle_opportunity else None
+        lifecycle_opp_id = opportunity.lifecycle_opportunity.id if opportunity.lifecycle_opportunity else None
 
         return OpportunityReportDTO(
             opportunity_id=opportunity.id,
@@ -237,4 +229,6 @@ class OpportunityReportService:
             embedding_model=opportunity.embedding_model,
             refinement_iteration_count=opportunity.refinement_iteration_count,
             pipeline_version=opportunity.pipeline_version,
+            lifecycle_status=lifecycle_status,
+            lifecycle_opportunity_id=lifecycle_opp_id,
         )

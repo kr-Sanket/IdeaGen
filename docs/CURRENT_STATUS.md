@@ -1,16 +1,149 @@
 # Current Status
 
-> **Last updated:** 2026-10-04
+> **Last updated:** 2026-10-21
+> Facts below were checked against the source code, test runs and experiment artifacts on this date.
+> Verification limits are stated explicitly; anything not listed as executed was not executed.
 
 ---
 
 ## Current Phase
 
-**Phase 3** — Dockerized PostgreSQL Persistence Foundation implemented. Paper schema and Alembic migrations created. Awaiting rate-limit recovery for full corpus ingestion.
+**Backend pipeline hardening complete; checkpoint commit pending.** The evidence-grounded pipeline
+(ingestion → relevance screening → extraction → gap discovery → opportunity generation → temporal
+evolution) is implemented and exercised end to end by the controlled experiment runner. A read-only
+frontend explorer has been rebuilt. Next step: frontend demonstration work on top of the existing API.
 
 ---
 
-## Completed
+## Current Implementation
+
+| Area | Status | Evidence |
+|------|--------|----------|
+| Backend stack | FastAPI app, SQLAlchemy models, Pydantic schemas | `backend/ideagen/api/main.py`, `api/schema.py`, `db/models.py` |
+| Database | PostgreSQL is the intended application store (Alembic chain, 11 revisions, head `e7b3c9a14f52`). Experiments and tests use SQLite via `create_all` | `backend/alembic/versions/`, `experiments/runner.py` |
+| LLM / embeddings | Ollama `qwen3:8b` (structured output, `think: false`) and `nomic-embed-text` (768-d) behind provider abstractions; Gemini provider retained | `ideagen/llm/`, `ideagen/discovery/embeddings.py` |
+| PDF ingestion | PyMuPDF extraction, section detection, deterministic passage chunking, SHA-256 content-hash deduplication; no fabricated publication dates | `ideagen/ingestion/pdf.py`, `ideagen/ingestion/passage_chunker.py` |
+| OpenAlex search and ingestion | Search API with strict ID/DOI query routing; ingest endpoint with SSRF-hardened open-access PDF downloader (global-unicast-only destinations, DNS pinning, redirect validation, size and signature checks) and metadata-only fallback | `ingestion/search.py`, `ingestion/openalex_ingestion.py`, `ingestion/downloader.py` |
+| Relevance screening | Deterministic embedding ranking of pre-cutoff papers (no LLM); decisions recorded and reused only when the input signature (including the scored abstract) matches | `ideagen/discovery/screening.py` |
+| Statement extraction | LLM extraction with passage provenance and bounded passage selection | `ideagen/understanding/` |
+| Gap discovery | Agglomerative clustering (cosine), limitation eligibility filtering, fail-closed citation validation, optional temporal cutoff | `ideagen/discovery/` |
+| Opportunity generation | Generation, prior-art assessment and refinement; failures return an error (no fabricated fallback). Reports return `null` for assessments that were not recorded | `ideagen/generation/`, `ideagen/reporting/report_service.py` |
+| Lifecycle and evolution | Deterministic state machine (OPEN / STRENGTHENED / PARTIALLY_ADDRESSED / RESOLVED); LLM classifies, code transitions; grounding fails closed; unique (opportunity, paper) evidence; `/evolve` enforces a lower temporal bound (papers must be published on or after the opportunity's creation date) | `ideagen/opportunity/` |
+| Post-ingestion evolution | Optional, **off by default**; a request cannot enable it unless the server setting `IDEAGEN_ENABLE_POST_INGESTION_EVOLUTION` is on; at most `IDEAGEN_POST_INGESTION_EVOLUTION_MAX_CANDIDATES` (default 20) eligible opportunities classified per paper | `api/main.py`, `opportunity/incremental.py` |
+| Classifier prompt | Version `v2` (revised ADDRESSES/EXTENDS definitions); recorded in the runner configuration fingerprint | `ideagen/opportunity/classifier.py` |
+| Controlled experiment runner | SQLite isolation, configuration fingerprint and corpus hashes, resume refusal on mismatch, Stage 3 completion marker, bounded Stage 5 classifier input, explicit Stage 5 commits | `experiments/runner.py` |
+| Evaluation code | Pairwise clustering metrics, TF-IDF discovery baseline, Stage 4/4B/4D classifier evaluation harnesses (evaluation-only; not used by production paths) | `ideagen/evaluation/` |
+| Frontend | React 19 + Vite + TypeScript read-only explorer (hash routing): run overview, opportunities, opportunity detail with evidence timeline, corpus inspector, statement provenance drawer. Missing values shown as "Not recorded"; verification labels follow the backend `verified` flag | `frontend/src/` |
+| Demo endpoints | `/api/demo/*` use scripted classifications and synthetic embeddings; responses carry a `data_notice` stating this | `ideagen/api/demo_service.py` |
+
+---
+
+## Verified Results
+
+### Automated tests (2026-10-21, local macOS, Python 3.14.8 virtualenv)
+
+```
+PYTHONDONTWRITEBYTECODE=1 backend/.venv/bin/pytest -p no:cacheprovider -q backend/tests \
+  --deselect tests/test_ollama_provider.py::test_live_ollama_smoke \
+  --deselect tests/understanding/test_understanding.py::test_real_model_inference_or_integration
+```
+
+- **689 passed, 0 failed, 24 skipped, 2 deselected.** All 24 skips require `IDEAGEN_DATABASE_URL`
+  (PostgreSQL); the 2 deselected tests call live models. Outbound network was blocked during the run.
+- Frontend: `tsc -p tsconfig.app.json --noEmit` → 0 errors; `oxlint src` → 0 errors, 7 warnings.
+
+### Controlled five-paper temporal experiment (2026-10-19)
+
+Artifacts: `experiments/artifacts/five_paper_temporal_compact_20261019/`; record:
+`docs/experiments/five_paper_temporal_experiment_20261019.md`.
+5 papers, 502 passages, 63 statements, 1 validated gap, 1 opportunity, 3 evaluation batches,
+4 evolution events, 0 status transitions, 464.58 s wall time. This run used classifier prompt v1.
+It demonstrates pipeline integrity on a tiny corpus; it does not establish scientific accuracy.
+
+### Relationship classifier evaluation (qwen3:8b, 25 hand-labelled cases)
+
+| Run | Overall | DEV (10) | HELD_OUT (15) | Real-literature subset (11) |
+|-----|---------|----------|---------------|------------------------------|
+| Prompt v1 (`stage4d_live_20261020_180110`) | 0.56 | 0.50 | 0.60 | 0.18 |
+| Prompt v2 (`stage4e_prompt_v2_20261021`) | 0.68 | 0.60 | 0.73 | 0.64 |
+
+Caveats: labels are single-annotator; prompt v2 was revised after inspecting v1 errors on these same
+25 cases, so its figures are not a held-out estimate; the sample is too small for statistical claims.
+
+---
+
+## Not Verified / Not Executed
+
+- **PostgreSQL**: no PostgreSQL instance was used; PostgreSQL-specific behaviour (Alembic upgrade on
+  Postgres, `SELECT ... FOR UPDATE`, savepoint semantics) is untested in this environment.
+- **Python 3.11–3.13**: no such interpreter was available. A static compatibility check
+  (annotation names, 3.12-only f-string syntax, PEP 695 syntax) reported no issues; this is not a
+  substitute for running the suite on 3.11.
+- **Live services in tests**: Ollama, Gemini, OpenAlex and PDF downloads are mocked in the test suite.
+- **Frontend runtime**: type-checked and linted only; no browser or end-to-end UI test.
+
+---
+
+## Not Implemented
+
+- Authentication / authorization (API is open; CORS allows all origins)
+- Full OpenAlex corpus acquisition (Phase 13 remains blocked/incomplete; no frozen corpus)
+- Human-annotated ground truth for gap discovery; baseline comparisons on real data
+- HDBSCAN clustering (agglomerative clustering is used instead)
+- SPECTER2 / sentence-transformer embeddings as the default path (Ollama embeddings are used)
+- Background job execution for long-running LLM operations (endpoints are synchronous)
+
+---
+
+## Known Limitations and Risks
+
+| Item | Description |
+|------|-------------|
+| Synchronous LLM endpoints | Discovery, generation, `/evolve` and opt-in post-ingestion evolution run LLM calls inside the request |
+| Temporal lower bound | Opportunities generated live (wall-clock `created_at`) cannot be evolved through `/evolve` with papers published before their creation; runner-generated opportunities are backdated to the baseline cutoff |
+| Legacy experiment databases | Stage 5 databases from before prompt v2 / recorded abstract bounds refuse to resume (by design) |
+| Address over-blocking | The downloader also blocks NAT64/6to4 forms of public hosts (fail-closed) |
+| Undeclared dependency | `requests` is imported by the Ollama providers but not declared in `backend/pyproject.toml`; numpy/faiss/scikit-learn are in the optional `ml` extra |
+| Remaining backlog | Opportunity generation failure returns 500 (502 would be more precise); evidence endpoint may report synthetic batch labels for papers outside configured Stage 5 windows; runner `--screening-only` has no effect without `--screening-topic` |
+| Benchmark reports | `experiments/stage4*/stage5/stage6_*_report.md` contain known inaccuracies and are excluded from version control pending an evidence-based rewrite |
+
+---
+
+## Open Decisions
+
+| Decision | Related Phase | Document |
+|----------|--------------|----------|
+| Exact OpenAlex query expression | Phase 1 | [CORPUS_SCOPE.md](CORPUS_SCOPE.md) |
+| OpenAlex API interaction approach | Phase 1 | [INGESTION_PLAN.md](INGESTION_PLAN.md) |
+| Full-text vs. abstract-only processing | Phase 2 | [EXTRACTION_PLAN.md](EXTRACTION_PLAN.md) |
+| Specific LLM model version | Phase 3 | [EXTRACTION_PLAN.md](EXTRACTION_PLAN.md) |
+| Prompt templates / extraction schema | Phase 3 | [EXTRACTION_PLAN.md](EXTRACTION_PLAN.md) |
+| Specific sentence-transformer model | Phase 4 | [EMBEDDING_STRATEGY.md](EMBEDDING_STRATEGY.md) |
+| Re-embedding protocol | Phase 4 | [EMBEDDING_STRATEGY.md](EMBEDDING_STRATEGY.md) |
+| Complete state transition rule table | Phase 6 | [MODEL_DESIGN.md](MODEL_DESIGN.md) |
+| Confidence formula | Phase 6 | [MODEL_DESIGN.md](MODEL_DESIGN.md) |
+| Near-duplicate opportunity merging | Phase 5 | [OPPORTUNITY_LIFECYCLE.md](OPPORTUNITY_LIFECYCLE.md) |
+| Evaluation metrics | Phase 9 | [EVALUATION_PLAN.md](EVALUATION_PLAN.md) |
+| Baseline selection | Phase 9 | [EVALUATION_PLAN.md](EVALUATION_PLAN.md) |
+| Dashboard requirements | Phase 10 | [EVALUATION_PLAN.md](EVALUATION_PLAN.md) |
+
+---
+
+## Dependencies
+
+Declared in `backend/pyproject.toml` (core, `ml` and `dev` extras) and `frontend/package.json`.
+This file no longer duplicates version lists.
+
+---
+
+## Phase History (as recorded at the time)
+
+The table below is preserved verbatim from earlier updates. Some entries are superseded:
+Phase 6's HDBSCAN placeholder was replaced by agglomerative clustering; the Phase 10 dashboard and the
+Phase 14 demo UI were replaced by the current read-only explorer; the Phase 14 demo uses scripted
+relationship classifications, not live model evolution; Phase 13 corpus acquisition remains incomplete.
+Test counts and environment claims in this table (including PostgreSQL test results) are historical
+and were not re-verified on 2026-10-21; see "Verified Results" above for the current evidence.
 
 | Item | Evidence |
 |------|----------|
@@ -50,96 +183,3 @@
 | Phase 13C.1 — ACQUISITION CORRECTNESS REPAIR | Removed unsafe `updated_date` pruning. Added `is_xpac=false` to explicitly match OpenAlex API core behavior, formalizing Corpus Specification v1.2.1. Validated database integrity (0 records inserted). Designed new per-partition checkpoint architecture (`ingestion_checkpoint_v13C.1.json`). Benchmarked transfer methods (HTTPS vs S3 anonymous). Fully tested specification changes. |
 | Phase 13D — CLOUD SNAPSHOT ACQ. FEASIBILITY + COST GATE | Designed an ephemeral AWS EC2 (c7g.4xlarge) architecture to process the 659 GB snapshot using 16 parallel multiprocessing workers in the `us-east-1` region. Estimated runtime drops from ~67 hours locally to <2 hours. Total estimated cost is <$2.00. The job produces a compact `JSONL.gz` artifact (~5MB) for SCP transfer back to the local database, completely bypassing long local HTTP bottlenecks. |
 | Phase 14 — REAL-DATA DEMO ONLY | Generated a prototype corpus of 20 real ArXiv papers on RAG hallucinations. Modified the `demo_service.py` to ingest these real papers into an in-memory test DB, mapping them across temporal batches. Fully demonstrated the Research Pipeline (Discovery -> Grounding -> Evolution) on real text with deterministic state transitions. Verified backend test suites and frontend build. Produced `DEMO_GUIDE.md` for local presentations. |
-
----
-
-## In Progress
-
-Nothing is currently in progress. Phase 14 is complete. Ready for Cloud EC2 deployment and actual full acquisition.
-
----
-
-## Planned
-
-| Phase | Description | Dependencies |
-|-------|-------------|-------------|
-| Phase 1 | OpenAlex ingestion | Phase 0 ✅ |
-| Phase 2 | Paper processing | Phase 1 |
-| Phase 3 | Structured information extraction | Phase 2 |
-| Phase 4 | Embeddings and semantic representation | Phase 3 |
-| Phase 5 | Opportunity discovery | Phase 4 |
-| Phase 6 | Opportunity model and lifecycle | Phase 3 |
-| Phase 7 | Temporal tracking | Phases 5, 6 |
-| Phase 8 | Evidence / RAG explanation | Phase 7 |
-| Phase 9 | Evaluation | Phase 8 |
-| Phase 10 | API / dashboard integration | Phase 9 |
-
-See [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) for details.
-
----
-
-## Not Implemented
-
-The following components are **designed** (documented in the project specification) but have **zero implementation** in the repository:
-
-- Paper processing pipeline
-- LLM structured extraction
-- SPECTER2 embeddings
-- Sentence-transformer embeddings
-- FAISS vector index
-- HDBSCAN clustering
-- Opportunity discovery
-- Opportunity model / state machine
-- Opportunity lifecycle management
-- Temporal tracking
-- Evidence/RAG explanation
-- Evaluation framework
-- FastAPI application
-- Database connection / PostgreSQL integration
-- Database tables / models
-- Frontend (React / Next.js)
-- `IDEAGEN_DATABASE_URL` configuration
-
----
-
-## Known Risks
-
-| Risk | Description | Mitigation |
-|------|-------------|-----------|
-| Corpus size uncertainty | Expected ~2,000–4,000 works but exact count requires OpenAlex validation | Validate metadata before full retrieval |
-| Open design decisions | Several design items remain open (state transition rules, confidence formula, specific models, evaluation metrics) | Resolve before implementing the corresponding phase |
-| Phase 1 definition conflict | Existing `06_STATE_AND_SESSION.md` defines Phase 1 as "Database Models and Schema"; authoritative spec defines it as "OpenAlex Ingestion" | Authoritative specification takes precedence |
-| Embedding model availability | SPECTER2 and sentence-transformer model availability/compatibility with Python 3.11+ | Verify during Phase 4 implementation |
-
----
-
-## Open Decisions
-
-| Decision | Related Phase | Document |
-|----------|--------------|----------|
-| Exact OpenAlex query expression | Phase 1 | [CORPUS_SCOPE.md](CORPUS_SCOPE.md) |
-| OpenAlex API interaction approach | Phase 1 | [INGESTION_PLAN.md](INGESTION_PLAN.md) |
-| Full-text vs. abstract-only processing | Phase 2 | [EXTRACTION_PLAN.md](EXTRACTION_PLAN.md) |
-| Specific LLM model version | Phase 3 | [EXTRACTION_PLAN.md](EXTRACTION_PLAN.md) |
-| Prompt templates / extraction schema | Phase 3 | [EXTRACTION_PLAN.md](EXTRACTION_PLAN.md) |
-| Specific sentence-transformer model | Phase 4 | [EMBEDDING_STRATEGY.md](EMBEDDING_STRATEGY.md) |
-| Re-embedding protocol | Phase 4 | [EMBEDDING_STRATEGY.md](EMBEDDING_STRATEGY.md) |
-| Complete state transition rule table | Phase 6 | [MODEL_DESIGN.md](MODEL_DESIGN.md) |
-| Confidence formula | Phase 6 | [MODEL_DESIGN.md](MODEL_DESIGN.md) |
-| Near-duplicate opportunity merging | Phase 5 | [OPPORTUNITY_LIFECYCLE.md](OPPORTUNITY_LIFECYCLE.md) |
-| Evaluation metrics | Phase 9 | [EVALUATION_PLAN.md](EVALUATION_PLAN.md) |
-| Baseline selection | Phase 9 | [EVALUATION_PLAN.md](EVALUATION_PLAN.md) |
-| Dashboard requirements | Phase 10 | [EVALUATION_PLAN.md](EVALUATION_PLAN.md) |
-
----
-
-## Installed Dependencies
-
-| Package | Version | Phase |
-|---------|---------|-------|
-| pydantic | 2.13.5 | Phase 0 |
-| pydantic-settings | 2.15.0 | Phase 0 |
-| pytest | 9.1.1 | Phase 0 (dev) |
-| pytest-cov | 7.1.0 | Phase 0 (dev) |
-
-No additional dependencies have been installed beyond Phase 0.
