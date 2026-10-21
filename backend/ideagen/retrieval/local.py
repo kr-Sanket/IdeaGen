@@ -1,8 +1,7 @@
-import uuid
 from typing import List, Protocol
 
 from ideagen.opportunity.discovery import cosine_similarity
-from ideagen.retrieval.evidence import EvidenceResult, EvidenceRetriever
+from ideagen.retrieval.evidence import EvidenceResult
 
 class PaperEvidenceEmbedder(Protocol):
     """Protocol for embedding paper text for evidence retrieval."""

@@ -15,7 +15,7 @@ Design & Safety:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 import datetime
 import hashlib
 import json
@@ -26,7 +26,7 @@ import uuid
 import numpy as np
 
 from ideagen.discovery.embeddings import EmbeddingProvider
-from ideagen.discovery.temporal import extract_paper_publication_date, is_paper_eligible
+from ideagen.discovery.temporal import extract_paper_publication_date
 from ideagen.opportunity.integration import resolve_paper_abstract
 
 # Abstract bound for the paper header embedded during scoring; the input signature hashes
