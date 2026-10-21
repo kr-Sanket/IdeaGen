@@ -49,7 +49,7 @@ Deterministic lifecycle transition
 
 ### Clustering Method
 
-The initial proposed clustering method is **HDBSCAN**.
+The initial design proposed **HDBSCAN**. In the active implementation (`backend/ideagen/discovery/grouper.py`), **Hierarchical Agglomerative Clustering** (`sklearn.cluster.AgglomerativeClustering` with average linkage, cosine distance threshold, and unit-normalized vectors) is used to form semantic clusters and filter out singleton noise across papers.
 
 ### Minimum Evidence Threshold
 
@@ -203,7 +203,7 @@ The complete state transition rule table is now established (Phase 5.1).
 - Any status + UNRELATED -> unchanged
 
 ### Resolution Policy
-**A single `ADDRESSES` relationship does NOT automatically transition an opportunity to `RESOLVED`.** 
+**A single `ADDRESSES` relationship does NOT automatically transition an opportunity to `RESOLVED`.**
 A single paper addressing an opportunity results in `PARTIALLY_ADDRESSED`. Reaching `RESOLVED` requires an explicit, multi-paper deterministic condition (to be defined in a future phase). For now, `RESOLVED` exists as a valid state in the schema and state machine, but no ordinary single-paper relationship should automatically trigger it.
 
 ---

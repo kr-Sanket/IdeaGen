@@ -151,7 +151,7 @@ IdeaGen/
 │   ├── processed/        # Cleaned and transformed data
 │   └── indexes/          # Search indexes (FAISS)
 ├── docs/                 # Project documentation (source of truth)
-├── frontend/             # React / Next.js frontend (not yet implemented)
+├── frontend/             # React + Vite + TypeScript explorer frontend (implemented)
 ├── notebooks/            # Jupyter notebooks for exploration
 ├── AGENTS.md             # This file
 └── README.md             # Project README

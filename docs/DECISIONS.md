@@ -58,13 +58,13 @@ Decisions are recorded as established by the authoritative design specification.
 
 ---
 
-## AD-06: HDBSCAN for Recurring-Gap Clustering
+## AD-06: Clustering Method for Recurring-Gap Discovery
 
-**Decision:** HDBSCAN is the initial proposed clustering method for identifying recurring research gaps.
+**Decision:** HDBSCAN was the initial design proposal for density-based clustering. In implementation, Hierarchical Agglomerative Clustering (`sklearn.cluster.AgglomerativeClustering` with average linkage, cosine distance threshold, and unit-normalized vectors) was adopted in `backend/ideagen/discovery/grouper.py`.
 
-**Context:** The project needs density-based clustering that does not require a pre-specified number of clusters. HDBSCAN supports this use case.
+**Context:** The project needs semantic clustering across research statements that groups related limitations and gaps without a rigid predefined cluster count (`n_clusters=None`, using a distance threshold). Agglomerative clustering provides deterministic clustering, threshold-based cluster formation, and removes singleton noise when multiple clusters form.
 
-**Status:** Established.
+**Status:** Superseded in implementation by Agglomerative Clustering (`backend/ideagen/discovery/grouper.py`). HDBSCAN preserved as initial design reference.
 
 ---
 
@@ -216,7 +216,7 @@ Decisions are recorded as established by the authoritative design specification.
 
 **Decision:** The relationship classifier is decoupled from database persistence. It produces a structured, Pydantic-validated `RelationshipClassification` containing the relationship, bounded confidence, rationale, and an optional evidence excerpt. It does not update the `Opportunity.status` directly.
 
-**Context:** The LLM is restricted to the role of a pure reasoning function. This guarantees it cannot hallucinate state transitions or corrupt database integrity. A dedicated service layer independently interprets the classification result to orchestrate database operations. A protocol abstraction (`LLMProvider`) isolates the domain logic from specific vendors like OpenAI or Anthropic. 
+**Context:** The LLM is restricted to the role of a pure reasoning function. This guarantees it cannot hallucinate state transitions or corrupt database integrity. A dedicated service layer independently interprets the classification result to orchestrate database operations. A protocol abstraction (`LLMProvider`) isolates the domain logic from specific vendors like OpenAI or Anthropic.
 
 **Status:** Established.
 

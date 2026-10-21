@@ -42,14 +42,22 @@ frontend explorer has been rebuilt. Next step: frontend demonstration work on to
 
 ### Automated tests (2026-10-21, local macOS, Python 3.14.8 virtualenv)
 
-```
-PYTHONDONTWRITEBYTECODE=1 backend/.venv/bin/pytest -p no:cacheprovider -q backend/tests \
-  --deselect tests/test_ollama_provider.py::test_live_ollama_smoke \
-  --deselect tests/understanding/test_understanding.py::test_real_model_inference_or_integration
-```
+Two verified test-run configurations were audited against the backend test suite:
 
-- **689 passed, 0 failed, 24 skipped, 2 deselected.** All 24 skips require `IDEAGEN_DATABASE_URL`
-  (PostgreSQL); the 2 deselected tests call live models. Outbound network was blocked during the run.
+1. **Standard Unfiltered Run** (`.venv/bin/pytest` or `pytest -q backend/tests`):
+   - **689 passed, 26 skipped, 0 failed, 0 deselected** (22.20 s).
+   - **Skip breakdown**: 25 skips are PostgreSQL-dependent (requiring `IDEAGEN_DATABASE_URL`, covering database session foundation, persistence layer, PDF storage, gap persistence, understanding persistence/API, and end-to-end integration); 1 skip (`tests/test_ollama_provider.py::test_live_ollama_smoke`) requires a reachable local Ollama HTTP service (`http://localhost:11434`).
+   - *Database note*: PostgreSQL integration has not been verified in this environment because PostgreSQL-dependent tests were skipped; passing offline SQLite tests does not establish PostgreSQL correctness. These counts are environment-specific and should be updated after future test runs.
+
+2. **Deselected Live-Model Run** (used during isolated offline audit):
+   ```bash
+   PYTHONDONTWRITEBYTECODE=1 backend/.venv/bin/pytest -p no:cacheprovider -q backend/tests \
+     --deselect tests/test_ollama_provider.py::test_live_ollama_smoke \
+     --deselect tests/understanding/test_understanding.py::test_real_model_inference_or_integration
+   ```
+   - **689 passed, 24 skipped, 0 failed, 2 deselected**.
+   - Deselecting `test_live_ollama_smoke` and `test_real_model_inference_or_integration` via command-line flags removes them from test execution, shifting their status from skipped to deselected and reducing the skip count from 26 to 24. Outbound network was blocked during the run.
+
 - Frontend: `tsc -p tsconfig.app.json --noEmit` → 0 errors; `oxlint src` → 0 errors, 7 warnings.
 
 ### Controlled five-paper temporal experiment (2026-10-19)
