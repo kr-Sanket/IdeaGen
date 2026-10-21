@@ -16,13 +16,6 @@ export function displayValue(value: unknown): string | null {
   return null;
 }
 
-/** Narrows an unknown JSON value to a plain object record. */
-export function asRecord(value: unknown): Record<string, unknown> | null {
-  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
-  }
-  return null;
-}
 
 /** Formats a 0..1 fraction as a percentage, or null when absent. */
 export function displayPercent(value: number | null | undefined): string | null {
