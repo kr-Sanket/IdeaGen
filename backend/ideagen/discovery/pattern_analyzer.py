@@ -173,10 +173,17 @@ class ResearchPatternAnalyzer:
                 f"Unresolved methodological limitation and open research direction: {lim_texts[0]}. "
                 f"Proposed future direction remains unaddressed: {fw_texts[0]}."
             )
-            why_insufficient = (
-                f"Existing approaches demonstrate documented constraints ({lim_texts[0]}), "
-                f"while subsequent work explicitly designates this problem for future investigation without resolution."
-            )
+            distinct_papers = len(supporting_paper_ids)
+            if distinct_papers > 1:
+                why_insufficient = (
+                    f"Existing approaches demonstrate documented constraints ({lim_texts[0]}), "
+                    f"while subsequent work explicitly designates this problem for future investigation without resolution."
+                )
+            else:
+                why_insufficient = (
+                    f"Current work demonstrates documented constraints ({lim_texts[0]}), "
+                    f"while explicitly designating this problem for future investigation without resolution."
+                )
         elif has_limitations:
             distinct_papers = len(supporting_paper_ids)
             if distinct_papers > 1:

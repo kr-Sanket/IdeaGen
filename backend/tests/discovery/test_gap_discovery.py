@@ -915,3 +915,84 @@ def test_pattern_analyzer_single_vs_multi_paper_corroboration():
     assert p1 in gap.supporting_paper_ids
     assert p2 in gap.supporting_paper_ids
 
+
+def test_pattern_analyzer_single_paper_limitation_and_future_work():
+    """Single-paper limitation and future work must not claim 'subsequent work'."""
+    analyzer = ResearchPatternAnalyzer(min_supporting_evidence=1)
+    s1_id = uuid.uuid4()
+    s2_id = uuid.uuid4()
+    p1 = uuid.uuid4()
+
+    statements = [
+        {
+            "id": s1_id,
+            "paper_id": p1,
+            "statement_type": "LIMITATION",
+            "statement_text": "Context pruning fails on long distractor documents.",
+        },
+        {
+            "id": s2_id,
+            "paper_id": p1,
+            "statement_type": "FUTURE_WORK",
+            "statement_text": "Developing iterative pruning for multi-hop QA.",
+        },
+    ]
+
+    cluster = SemanticCluster(
+        cluster_id=0,
+        statements=statements,
+        paper_ids={p1},
+        centroid=np.ones(10, dtype=np.float32),
+        statement_type_counts={"LIMITATION": 1, "FUTURE_WORK": 1},
+    )
+
+    candidates = analyzer.analyze_clusters([cluster])
+    assert len(candidates) == 1
+
+    gap = candidates[0]
+    assert gap.signals["pattern_type"] == "LIMITATION_AND_FUTURE_WORK"
+    assert "subsequent work" not in gap.why_existing_work_insufficient
+    assert "Current work demonstrates documented constraints" in gap.why_existing_work_insufficient
+    assert p1 in gap.supporting_paper_ids
+    assert len(gap.supporting_paper_ids) == 1
+
+
+def test_pattern_analyzer_multi_paper_limitation_and_future_work():
+    """Multi-paper limitation and future work appropriately references subsequent work."""
+    analyzer = ResearchPatternAnalyzer(min_supporting_evidence=1)
+    s1_id = uuid.uuid4()
+    s2_id = uuid.uuid4()
+    p1 = uuid.uuid4()
+    p2 = uuid.uuid4()
+
+    statements = [
+        {
+            "id": s1_id,
+            "paper_id": p1,
+            "statement_type": "LIMITATION",
+            "statement_text": "Context pruning fails on long distractor documents.",
+        },
+        {
+            "id": s2_id,
+            "paper_id": p2,
+            "statement_type": "FUTURE_WORK",
+            "statement_text": "Developing iterative pruning for multi-hop QA.",
+        },
+    ]
+
+    cluster = SemanticCluster(
+        cluster_id=0,
+        statements=statements,
+        paper_ids={p1, p2},
+        centroid=np.ones(10, dtype=np.float32),
+        statement_type_counts={"LIMITATION": 1, "FUTURE_WORK": 1},
+    )
+
+    candidates = analyzer.analyze_clusters([cluster])
+    assert len(candidates) == 1
+
+    gap = candidates[0]
+    assert gap.signals["pattern_type"] == "LIMITATION_AND_FUTURE_WORK"
+    assert "subsequent work explicitly designates this problem" in gap.why_existing_work_insufficient
+    assert set(gap.supporting_paper_ids) == {p1, p2}
+    assert len(gap.supporting_paper_ids) == 2

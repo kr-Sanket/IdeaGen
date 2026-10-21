@@ -186,3 +186,37 @@ def test_malformed_missing_signal_handling(discovery_service):
     candidates = discovery_service.discover_opportunities([s1, s2])
     # they will fallback to [0,0,1], cluster together
     assert len(candidates) == 1
+
+
+def test_single_paper_signals_produce_documented_gap(discovery_service):
+    p1 = uuid.uuid4()
+    s1 = make_signal("high memory overhead is an issue", p_id=p1)
+    s2 = make_signal("the memory overhead restricts scaling", p_id=p1)
+
+    candidates = discovery_service.discover_opportunities([s1, s2])
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate.cluster_size == 2
+    assert len(candidate.supporting_paper_ids) == 1
+    assert candidate.supporting_paper_ids == [p1]
+    assert candidate.title.startswith("Documented Gap: ")
+    assert not candidate.title.startswith("Recurring Gap: ")
+    assert "within 1 paper" in candidate.description
+    assert "2 similar statements within 1 paper" in candidate.description
+
+
+def test_multi_paper_signals_produce_recurring_gap(discovery_service):
+    p1, p2 = uuid.uuid4(), uuid.uuid4()
+    s1 = make_signal("high memory overhead is an issue", p_id=p1)
+    s2 = make_signal("the memory overhead restricts scaling", p_id=p2)
+
+    candidates = discovery_service.discover_opportunities([s1, s2])
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate.cluster_size == 2
+    assert len(candidate.supporting_paper_ids) == 2
+    assert set(candidate.supporting_paper_ids) == {p1, p2}
+    assert candidate.title.startswith("Recurring Gap: ")
+    assert not candidate.title.startswith("Documented Gap: ")
+    assert "across 2 papers" in candidate.description
+    assert "2 similar statements across 2 papers" in candidate.description
