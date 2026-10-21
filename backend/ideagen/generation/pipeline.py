@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from typing import List, Optional, Tuple, Set
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from ideagen.discovery.vector_index import StatementVectorIndex
@@ -139,7 +139,7 @@ class ResearchOpportunityPipeline:
             supporting_paper_ids=final_candidate.supporting_paper_ids,
             prior_art_statement_ids=prior_art_stmt_ids,
             status=final_status,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
             generation_model=self.generation_model,
             validation_model=self.validation_model,
             embedding_model=self.embedding_model,

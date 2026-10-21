@@ -15,7 +15,7 @@ class ResearchGapSignal:
     normalized_statement: str
     source_type: str = "manual"
     confidence: float = 1.0
-    created_at: datetime.datetime = field(default_factory=datetime.datetime.utcnow)
+    created_at: datetime.datetime = field(default_factory=lambda: datetime.datetime.now(datetime.timezone.utc))
 
 @dataclass(frozen=True)
 class OpportunityCandidate:

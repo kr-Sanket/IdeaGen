@@ -7,7 +7,7 @@ and model extraction schemas with full provenance tracking.
 from __future__ import annotations
 
 import enum
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -92,7 +92,7 @@ class ResearchKnowledgeCreateDTO(BaseModel):
     model_name: str
     model_version: Optional[str] = None
     extraction_schema_version: str = "v1.0"
-    extracted_at: datetime = Field(default_factory=datetime.utcnow)
+    extracted_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     extraction_status: ExtractionStatus = ExtractionStatus.SUCCESS
     error_message: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
