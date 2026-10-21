@@ -61,6 +61,7 @@ from ideagen.opportunity.incremental import (
     OpportunityEvaluationOutcome,
     OpportunityEvaluationStatus,
 )
+from ideagen.opportunity.ranking import TFIDFCandidateRanker, FIFOCandidateRanker
 from ideagen.llm.provider import LLMProvider
 from ideagen.llm.exceptions import ProviderFailureError
 
@@ -146,8 +147,10 @@ def isolated_db():
 class MockLLMProvider(LLMProvider):
     def __init__(self, classification: RelationshipClassification):
         self.classification = classification
+        self.call_count: int = 0
 
     def generate_structured(self, prompt: str, response_schema):
+        self.call_count += 1
         return self.classification
 
 
@@ -518,3 +521,207 @@ def test_success_with_zero_evaluated_mapped_to_skipped(isolated_db: Session):
     assert result.evolution_result is not None
     assert result.evolution_result.evaluated_count == 0
     assert result.evolution_result.skipped_count == 2
+
+
+# ── TEST 10: Ingestion triggers configured candidate ranking under candidate cap ──
+
+@pytest.mark.parametrize("ranking_strategy", ["tfidf", "fifo"])
+def test_ingestion_triggers_candidate_ranking_strategy_under_cap(
+    isolated_db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    ranking_strategy: str,
+):
+    """Verifies that OpenAlex ingestion triggers the real evolution service with the
+    configured candidate ranking strategy (TF-IDF vs FIFO), properly consuming the
+    environment setting, evaluating the appropriate opportunity under cap=1, and
+    persisting evidence and lifecycle history.
+    """
+    session = isolated_db
+    persistence = SQLAlchemyPersistenceLayer(session)
+
+    # 1. Configure settings: enable post-ingestion evolution, candidate cap = 1, strategy from parameter
+    monkeypatch.setenv("IDEAGEN_ENABLE_POST_INGESTION_EVOLUTION", "true")
+    monkeypatch.setenv("IDEAGEN_CANDIDATE_RANKING_STRATEGY", ranking_strategy)
+    monkeypatch.setenv("IDEAGEN_POST_INGESTION_EVOLUTION_MAX_CANDIDATES", "1")
+
+    # 2. Seed 3 older unrelated distractor opportunities (created in 2020-2021)
+    distractor_1 = Opportunity(
+        id=uuid.uuid4(),
+        title="Deep Vision Transformers for Medical Image Segmentation",
+        problem_statement="Vision transformer attention heads miss fine-grained boundary features in MRI scans.",
+        description="Study convolutional hybrid backbones for biomedical MRI slice segmentation.",
+        status=OpportunityStatus.OPEN.value,
+        confidence=0.85,
+        created_at=datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc),
+    )
+    distractor_2 = Opportunity(
+        id=uuid.uuid4(),
+        title="High-Throughput Genomic Sequencing Pipelines",
+        problem_statement="Sequence alignment bottlenecks on long-read sequencing datasets.",
+        description="Design GPU-accelerated Smith-Waterman aligners for genomic variant calling.",
+        status=OpportunityStatus.OPEN.value,
+        confidence=0.85,
+        created_at=datetime.datetime(2020, 6, 1, tzinfo=datetime.timezone.utc),
+    )
+    distractor_3 = Opportunity(
+        id=uuid.uuid4(),
+        title="Autonomous Mobile Robotics SLAM Trajectory Optimization",
+        problem_statement="Lidar odometry drifts significantly in feature-sparse underground environments.",
+        description="Investigate factor graph smoothing for autonomous underground mobile robotics.",
+        status=OpportunityStatus.OPEN.value,
+        confidence=0.85,
+        created_at=datetime.datetime(2021, 1, 1, tzinfo=datetime.timezone.utc),
+    )
+
+    # 3. Seed 1 newer relevant opportunity (created in 2022) matching consensus partition topic
+    opp_relevant = Opportunity(
+        id=uuid.uuid4(),
+        title="Byzantine Consensus Under Asymmetric Network Partitions",
+        problem_statement="Distributed consensus protocols deadlock during asymmetric network partition and high latency.",
+        description="Design partition-tolerant Byzantine state machine replication protocols with guaranteed liveness.",
+        status=OpportunityStatus.OPEN.value,
+        confidence=0.90,
+        created_at=datetime.datetime(2022, 1, 1, tzinfo=datetime.timezone.utc),
+    )
+
+    session.add_all([distractor_1, distractor_2, distractor_3, opp_relevant])
+    session.commit()
+
+    # Determine expected ranker class and targets based on ranking strategy:
+    # TF-IDF evaluates the lexically relevant opportunity and skips older distractors.
+    # FIFO evaluates the oldest opportunity (distractor_1) and skips the newer relevant opportunity.
+    if ranking_strategy == "tfidf":
+        expected_ranker_cls = TFIDFCandidateRanker
+        expected_evaluated = opp_relevant
+        expected_skipped = [distractor_1, distractor_2, distractor_3]
+    elif ranking_strategy == "fifo":
+        expected_ranker_cls = FIFOCandidateRanker
+        expected_evaluated = distractor_1
+        expected_skipped = [distractor_2, distractor_3, opp_relevant]
+    else:
+        pytest.fail(f"Unexpected ranking strategy: {ranking_strategy}")
+
+    # 4. Prepare deterministic mock LLM provider with grounded classification and call tracking
+    passage_excerpt = "Byzantine consensus bounds under asymmetric network partition delay."
+    mock_llm = MockLLMProvider(
+        classification=RelationshipClassification(
+            relationship=OpportunityRelationship.ADDRESSES,
+            confidence=0.95,
+            rationale="Addresses evaluated opportunity under candidate ranking.",
+            evidence_excerpt=passage_excerpt,
+        )
+    )
+
+    # 5. Prepare paper and PDF content (published in 2023, after all opportunities)
+    paper_title = "Byzantine Consensus Protocols Under Asymmetric Network Delay"
+    abstract_text = "We analyze partition tolerance and state machine replication in distributed systems under Byzantine network faults."
+    abstract_words = abstract_text.split()
+    abstract_index = {word: [i] for i, word in enumerate(abstract_words)}
+
+    work = {
+        "id": "https://openalex.org/W99990001",
+        "doi": "https://doi.org/10.1000/w99990001",
+        "title": paper_title,
+        "publication_date": "2023-01-01",
+        "abstract_inverted_index": abstract_index,
+        "authorships": [{"author": {"display_name": "Distributed Systems Researcher"}}],
+        "primary_location": {
+            "source": {"type": "journal"},
+            "pdf_url": "https://example.com/consensus.pdf",
+            "landing_page_url": "https://example.com/consensus",
+        },
+        "best_oa_location": {
+            "pdf_url": "https://example.com/consensus.pdf",
+            "landing_page_url": "https://example.com/consensus",
+        },
+    }
+
+    pdf_bytes = create_sample_pdf_bytes(title=paper_title, body=passage_excerpt)
+
+    # 6. Instantiate OpenAlexPaperIngestionService with auto_evolve=None (reads settings)
+    # and evolution_service=None (triggers _get_or_create_evolution_service)
+    service = OpenAlexPaperIngestionService(
+        persistence=persistence,
+        auto_evolve=None,
+        evolution_service=None,
+    )
+
+    # 7. Execute ingestion and evolution path (patching LLM provider lookup and PDF download stream)
+    with patch("ideagen.llm.get_default_llm_provider", return_value=mock_llm), \
+         patch.object(service.downloader, "_open_request", return_value=DummyMockResponse(pdf_bytes)):
+        result = service.ingest_work(work)
+
+    # 8. Verify ingestion outcome and evolution hook status
+    assert result.status == IngestionStatus.INGESTED
+    assert result.has_pdf is True
+    assert result.evolution_status == EvolutionHookStatus.SUCCESS
+    assert result.evolution_result is not None
+    assert result.evolution_result.run_status == IncrementalEvolutionRunStatus.SUCCESS
+
+    # Verify candidate count accounting: 4 candidates found, 1 evaluated under cap=1, 3 skipped
+    assert result.evolution_result.candidate_count == 4
+    assert result.evolution_result.evaluated_count == 1
+    assert result.evolution_result.skipped_count == 3
+    assert result.evolution_result.grounding_rejected_count == 0
+    assert result.evolution_result.failed_count == 0
+
+    # Verify exactly one classification call occurred under candidate cap 1
+    assert mock_llm.call_count == 1
+
+    # 9. Verify that the real evolution service used the configured candidate ranker and cap
+    assert service.evolution_service is not None
+    assert isinstance(service.evolution_service.candidate_ranker, expected_ranker_cls)
+    assert service.evolution_service.max_candidates == 1
+
+    # 10. Verify candidate evaluation outcomes:
+    # Expected candidate was evaluated; other 3 were skipped by candidate limit
+    outcomes = {o.opportunity_id: o for o in result.evolution_result.outcomes}
+    assert outcomes[expected_evaluated.id].status == OpportunityEvaluationStatus.EVALUATED
+    for skipped_opp in expected_skipped:
+        assert outcomes[skipped_opp.id].status == OpportunityEvaluationStatus.SKIPPED
+        assert "Candidate limit (1) reached" in outcomes[skipped_opp.id].skip_reason
+
+    # 11. Verify lifecycle and persistence:
+    # Evaluated opportunity transitioned to PARTIALLY_ADDRESSED
+    session.refresh(expected_evaluated)
+    assert expected_evaluated.status == OpportunityStatus.PARTIALLY_ADDRESSED.value
+
+    # Skipped opportunities remained in OPEN status
+    for skipped_opp in expected_skipped:
+        session.refresh(skipped_opp)
+        assert skipped_opp.status == OpportunityStatus.OPEN.value
+
+    # Exactly one Evidence record exists for the evaluated opportunity
+    evidence_rows = session.execute(
+        select(OpportunityEvidence).where(OpportunityEvidence.opportunity_id == expected_evaluated.id)
+    ).scalars().all()
+    assert len(evidence_rows) == 1
+    evidence = evidence_rows[0]
+    assert evidence.paper_id == result.paper_id
+    assert evidence.evidence_type == OpportunityRelationship.ADDRESSES.value
+    assert evidence.supporting_text == passage_excerpt
+
+    # No evidence records exist for skipped opportunities
+    for skipped_opp in expected_skipped:
+        skipped_evidence = session.execute(
+            select(OpportunityEvidence).where(OpportunityEvidence.opportunity_id == skipped_opp.id)
+        ).scalars().all()
+        assert len(skipped_evidence) == 0
+
+    # Exactly one History record was persisted for the evaluated opportunity, with matching transition fields
+    history_rows = session.execute(
+        select(OpportunityHistory).where(OpportunityHistory.opportunity_id == expected_evaluated.id)
+    ).scalars().all()
+    assert len(history_rows) == 1
+    history_record = history_rows[0]
+    assert history_record.previous_status == OpportunityStatus.OPEN.value
+    assert history_record.new_status == OpportunityStatus.PARTIALLY_ADDRESSED.value
+    assert history_record.trigger_type == OpportunityRelationship.ADDRESSES.value
+    assert history_record.evidence_id == evidence.id
+
+    # No history records exist for skipped opportunities
+    for skipped_opp in expected_skipped:
+        skipped_history = session.execute(
+            select(OpportunityHistory).where(OpportunityHistory.opportunity_id == skipped_opp.id)
+        ).scalars().all()
+        assert len(skipped_history) == 0
