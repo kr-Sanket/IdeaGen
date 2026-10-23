@@ -38,6 +38,7 @@ def test_ollama_provider_defaults():
     assert provider.model_name == "qwen3:8b"
     assert provider.timeout == 300.0
     assert provider.num_ctx == 8192
+    assert provider.num_predict == 512
 
 
 def test_ollama_provider_custom_config():
@@ -46,11 +47,13 @@ def test_ollama_provider_custom_config():
         model_name="custom-model",
         timeout=45.0,
         num_ctx=4096,
+        num_predict=256,
     )
     assert provider.base_url == "http://custom-host:11434"
     assert provider.model_name == "custom-model"
     assert provider.timeout == 45.0
     assert provider.num_ctx == 4096
+    assert provider.num_predict == 256
 
 
 @patch("requests.post")
@@ -85,6 +88,55 @@ def test_ollama_generate_structured_success(mock_post):
     assert call_kwargs["json"]["think"] is False
     assert call_kwargs["json"]["options"]["temperature"] == 0.0
     assert call_kwargs["json"]["options"]["num_ctx"] == 8192
+    assert call_kwargs["json"]["options"]["num_predict"] == 512
+
+
+@patch("requests.post")
+def test_ollama_generate_structured_custom_num_predict(mock_post):
+    payload = {
+        "message": {
+            "content": json.dumps({
+                "hypothesis": "Test hypothesis.",
+                "confidence": 0.9,
+                "is_falsifiable": True,
+            })
+        }
+    }
+    mock_post.return_value = MagicMock(
+        status_code=200,
+        json=MagicMock(return_value=payload),
+    )
+
+    provider = OllamaLLMProvider(num_predict=1024)
+    res = provider.generate_structured("Test prompt", SampleResearchHypothesis)
+    assert res.hypothesis == "Test hypothesis."
+
+    call_kwargs = mock_post.call_args[1]
+    assert call_kwargs["json"]["options"]["num_predict"] == 1024
+
+
+@patch("requests.post")
+def test_ollama_generate_structured_num_predict_none(mock_post):
+    payload = {
+        "message": {
+            "content": json.dumps({
+                "hypothesis": "Test hypothesis.",
+                "confidence": 0.9,
+                "is_falsifiable": True,
+            })
+        }
+    }
+    mock_post.return_value = MagicMock(
+        status_code=200,
+        json=MagicMock(return_value=payload),
+    )
+
+    provider = OllamaLLMProvider(num_predict=None)
+    res = provider.generate_structured("Test prompt", SampleResearchHypothesis)
+    assert res.hypothesis == "Test hypothesis."
+
+    call_kwargs = mock_post.call_args[1]
+    assert "num_predict" not in call_kwargs["json"]["options"]
 
 
 @patch("requests.post")

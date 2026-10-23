@@ -6,6 +6,7 @@ Comprehensive offline integration validation across:
 3. Incremental multi-paper lifecycle transitions & contradiction reopening (OPEN -> PARTIALLY_ADDRESSED -> RESOLVED -> OPEN).
 4. Evolution failure isolation (provider failure leaves paper/document/passages intact, no partial evidence).
 5. Temporal consistency and eligibility enforcement (opp_date > pub_date skipped, undated skipped, NO_PDF skipped, no future-data leakage).
+6. Generation-to-lifecycle bridging and post-ingestion evolution with catalog projection.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from ideagen.db.models import (
     OpportunityEvidence,
     OpportunityHistory,
     ResearchOpportunityRecord,
+    ResearchGap,
 )
 from ideagen.db.persistence import SQLAlchemyPersistenceLayer
 from ideagen.ingestion.models import SourceType
@@ -53,6 +55,15 @@ from ideagen.opportunity.incremental import (
     IncrementalEvolutionRunStatus,
     OpportunityEvaluationStatus,
 )
+from ideagen.opportunity.ranking import TFIDFCandidateRanker
+from ideagen.generation.models import (
+    ResearchOpportunityDTO,
+    FeasibilityAssessment,
+    NoveltyAssessment,
+    OpportunityStatus as GenerationOpportunityStatus,
+)
+from ideagen.generation.persistence import OpportunityPersistenceLayer
+from ideagen.api.main import list_opportunities
 from ideagen.llm.provider import LLMProvider
 from ideagen.llm.exceptions import ProviderFailureError
 
@@ -146,11 +157,13 @@ class ConfigurableMockLLMProvider(LLMProvider):
         self.routes: Dict[str, RelationshipClassification] = {}
         self.should_fail: bool = False
         self.failure_error: Exception = ProviderFailureError("Mock LLM Provider outage 503")
+        self.call_count: int = 0
 
     def set_route(self, key_fragment: str, classification: RelationshipClassification):
         self.routes[key_fragment] = classification
 
     def generate_structured(self, prompt: str, response_schema):
+        self.call_count += 1
         if self.should_fail:
             raise self.failure_error
 
@@ -652,3 +665,205 @@ def test_scenario_5_temporal_and_eligibility_correctness(isolated_db: Session):
     assert res_no_pdf.status == IngestionStatus.NO_PDF
     assert res_no_pdf.evolution_status == EvolutionHookStatus.SKIPPED
     assert res_no_pdf.evolution_result is None
+
+
+# ── SCENARIO 6: BRIDGED GENERATION RECORD LIFECYCLE EVOLUTION ───────────────────
+
+def test_scenario_6_bridged_generation_record_lifecycle_evolution(
+    isolated_db: Session,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Validates that a generated and persisted ResearchOpportunityRecord bridges into
+
+    the Opportunity lifecycle table, is selected by TF-IDF ranking over older distractors
+    during paper ingestion, transitions lifecycle status with persisted evidence/history,
+    and is accurately reflected in the public opportunity catalog projection.
+    """
+    session = isolated_db
+    persistence = SQLAlchemyPersistenceLayer(session)
+
+    # 1. Configure settings: enable post-ingestion evolution, candidate cap = 1, strategy = tfidf
+    monkeypatch.setenv("IDEAGEN_ENABLE_POST_INGESTION_EVOLUTION", "true")
+    monkeypatch.setenv("IDEAGEN_CANDIDATE_RANKING_STRATEGY", "tfidf")
+    monkeypatch.setenv("IDEAGEN_POST_INGESTION_EVOLUTION_MAX_CANDIDATES", "1")
+
+    # 2. Seed a valid ResearchGap for foreign key integrity
+    gap = ResearchGap(
+        id=uuid.uuid4(),
+        gap_statement="Consensus latency degradation under asymmetric network delay",
+        research_problem="Distributed consensus protocols deadlock during asymmetric network partition and high latency.",
+        status="VALIDATED",
+        evidence_count=1,
+    )
+    session.add(gap)
+    session.commit()
+
+    # 3. Create a validated ResearchOpportunityDTO and persist via OpportunityPersistenceLayer
+    opp_dto = ResearchOpportunityDTO(
+        id=uuid.uuid4(),
+        gap_id=gap.id,
+        research_problem="Distributed consensus protocols deadlock during asymmetric network partition and high latency.",
+        identified_gap="Consensus latency degradation under asymmetric network delay",
+        proposed_research_direction="Byzantine Consensus Under Asymmetric Network Partitions",
+        reasoning="Partition-tolerant Byzantine state machine replication protocols with guaranteed liveness.",
+        technical_approach="Dynamic quorum adaptivity and bounded timeout relaxation.",
+        expected_contribution="Provably live Byzantine consensus under asymmetric delay.",
+        feasibility=FeasibilityAssessment(
+            required_data="Simulated network traces",
+            required_compute="1x GPU",
+            implementation_complexity="Moderate",
+            experimental_setup="WAN testbed",
+        ),
+        novelty_assessment=NoveltyAssessment(
+            assessment="Potentially novel within the analyzed corpus",
+            reasoning="Prior algorithms assume partially synchronous network delay bounds.",
+            differentiation="Addresses asymmetric partitions with dynamic timeout bounds.",
+        ),
+        confidence=0.88,
+        status=GenerationOpportunityStatus.VALIDATED,
+        created_at=datetime.datetime(2022, 1, 1, tzinfo=datetime.timezone.utc),
+    )
+
+    p_layer = OpportunityPersistenceLayer(session)
+    saved_record = p_layer.save_opportunity(opp_dto, bridge=True)
+
+    # Verify that the Opportunity lifecycle entity was created automatically with OPEN status
+    bridged_opp = session.execute(
+        select(Opportunity).where(Opportunity.research_opportunity_id == saved_record.id)
+    ).scalar_one_or_none()
+    assert bridged_opp is not None
+    assert bridged_opp.status == OpportunityStatus.OPEN.value
+    assert bridged_opp.research_opportunity_id == saved_record.id
+    assert bridged_opp.gap_id == gap.id
+    assert bridged_opp.title == opp_dto.proposed_research_direction
+    actual_created_at = bridged_opp.created_at.replace(tzinfo=datetime.timezone.utc) if bridged_opp.created_at.tzinfo is None else bridged_opp.created_at
+    assert actual_created_at == opp_dto.created_at
+
+    # 4. Seed an older unrelated distractor opportunity (created in 2020)
+    distractor_opp = Opportunity(
+        id=uuid.uuid4(),
+        title="Deep Vision Transformers for Medical Image Segmentation",
+        problem_statement="Vision transformer attention heads miss fine-grained boundary features in MRI scans.",
+        description="Study convolutional hybrid backbones for biomedical MRI slice segmentation.",
+        status=OpportunityStatus.OPEN.value,
+        confidence=0.85,
+        created_at=datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc),
+    )
+    session.add(distractor_opp)
+    session.commit()
+
+    # 5. Prepare paper and grounded mock LLM provider
+    passage_excerpt = "Byzantine consensus bounds under asymmetric network partition delay."
+    pdf_bytes = create_sample_pdf_bytes(
+        title="Byzantine Consensus Protocols Under Asymmetric Network Delay",
+        body=passage_excerpt,
+    )
+    abstract_text = "We analyze partition tolerance and state machine replication in distributed systems under Byzantine network faults."
+    abstract_words = abstract_text.split()
+    abstract_index = {word: [i] for i, word in enumerate(abstract_words)}
+
+    work = make_sample_work(
+        source_id="https://openalex.org/W_BRIDGED_E2E_1",
+        doi="https://doi.org/10.1000/bridgede2e1",
+        title="Byzantine Consensus Protocols Under Asymmetric Network Delay",
+        pdf_url="https://example.com/consensus.pdf",
+        pub_date="2023-01-01",
+    )
+    work["abstract_inverted_index"] = abstract_index
+
+    mock_llm = ConfigurableMockLLMProvider(
+        default_classification=RelationshipClassification(
+            relationship=OpportunityRelationship.ADDRESSES,
+            confidence=0.95,
+            rationale="Addresses partition consensus deadlock under asymmetric network delay.",
+            evidence_excerpt=passage_excerpt,
+        )
+    )
+
+    # 6. Instantiate OpenAlexPaperIngestionService with auto_evolve=None (reads settings)
+    # and evolution_service=None (triggers _get_or_create_evolution_service)
+    service = OpenAlexPaperIngestionService(
+        persistence=persistence,
+        auto_evolve=None,
+        evolution_service=None,
+    )
+
+    # 7. Execute ingestion and evolution path
+    with patch("ideagen.llm.get_default_llm_provider", return_value=mock_llm), \
+         patch.object(service.downloader, "_open_request", return_value=DummyMockResponse(pdf_bytes)):
+        result = service.ingest_work(work)
+
+    # 8. Assert ingestion and evolution outcome
+    assert result.status == IngestionStatus.INGESTED
+    assert result.has_pdf is True
+    assert result.evolution_status == EvolutionHookStatus.SUCCESS
+    assert result.evolution_result is not None
+    assert result.evolution_result.run_status == IncrementalEvolutionRunStatus.SUCCESS
+
+    # Candidate accounting under cap=1: 2 candidates found, 1 evaluated, 1 skipped, 0 rejected/failed
+    assert result.evolution_result.candidate_count == 2
+    assert result.evolution_result.evaluated_count == 1
+    assert result.evolution_result.skipped_count == 1
+    assert result.evolution_result.grounding_rejected_count == 0
+    assert result.evolution_result.failed_count == 0
+    assert mock_llm.call_count == 1
+
+    # Verify ranker used was TFIDFCandidateRanker and max_candidates was 1
+    assert service.evolution_service is not None
+    assert isinstance(service.evolution_service.candidate_ranker, TFIDFCandidateRanker)
+    assert service.evolution_service.max_candidates == 1
+
+    # Verify candidate outcomes: bridged opportunity evaluated, distractor skipped by cap
+    outcomes = {o.opportunity_id: o for o in result.evolution_result.outcomes}
+    assert outcomes[bridged_opp.id].status == OpportunityEvaluationStatus.EVALUATED
+    assert outcomes[distractor_opp.id].status == OpportunityEvaluationStatus.SKIPPED
+    assert "Candidate limit (1) reached" in outcomes[distractor_opp.id].skip_reason
+
+    # 9. Verify lifecycle and persistence in database
+    session.refresh(bridged_opp)
+    assert bridged_opp.status == OpportunityStatus.PARTIALLY_ADDRESSED.value
+
+    session.refresh(distractor_opp)
+    assert distractor_opp.status == OpportunityStatus.OPEN.value
+
+    # Exactly one Evidence record exists for the bridged opportunity
+    evidence_rows = session.execute(
+        select(OpportunityEvidence).where(OpportunityEvidence.opportunity_id == bridged_opp.id)
+    ).scalars().all()
+    assert len(evidence_rows) == 1
+    evidence = evidence_rows[0]
+    assert evidence.paper_id == result.paper_id
+    assert evidence.evidence_type == OpportunityRelationship.ADDRESSES.value
+    assert evidence.supporting_text == passage_excerpt
+
+    # Exactly zero evidence records for distractor
+    distractor_ev = session.execute(
+        select(OpportunityEvidence).where(OpportunityEvidence.opportunity_id == distractor_opp.id)
+    ).scalars().all()
+    assert len(distractor_ev) == 0
+
+    # Exactly one History record exists for the bridged opportunity with matching transitions
+    history_rows = session.execute(
+        select(OpportunityHistory).where(OpportunityHistory.opportunity_id == bridged_opp.id)
+    ).scalars().all()
+    assert len(history_rows) == 1
+    history = history_rows[0]
+    assert history.previous_status == OpportunityStatus.OPEN.value
+    assert history.new_status == OpportunityStatus.PARTIALLY_ADDRESSED.value
+    assert history.trigger_type == OpportunityRelationship.ADDRESSES.value
+    assert history.evidence_id == evidence.id
+
+    # Exactly zero history records for distractor
+    distractor_hist = session.execute(
+        select(OpportunityHistory).where(OpportunityHistory.opportunity_id == distractor_opp.id)
+    ).scalars().all()
+    assert len(distractor_hist) == 0
+
+    # 10. Verify actual list_opportunities catalog projection reflects the evolved lifecycle entity
+    catalog = list_opportunities(db=session)
+    catalog_map = {item["id"]: item for item in catalog}
+    assert str(saved_record.id) in catalog_map
+    record_item = catalog_map[str(saved_record.id)]
+    assert record_item["lifecycle_opportunity_id"] == str(bridged_opp.id)
+    assert record_item["lifecycle_status"] == OpportunityStatus.PARTIALLY_ADDRESSED.value
+    assert record_item["evidence_count"] == 1

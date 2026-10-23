@@ -20,7 +20,10 @@ export type BadgeVariant =
   | 'statement-finding'
   | 'statement-observation'
   | 'neutral'
-  | 'model-generated';
+  | 'model-generated'
+  | 'status-positive'
+  | 'status-warning'
+  | 'status-negative';
 
 /**
  * Maps lifecycle states (backend/ideagen/opportunity/models.py OpportunityStatus)
@@ -112,4 +115,35 @@ export function getStatementTypeBadgeVariant(type: string | null | undefined): B
     default:
       return 'statement-observation';
   }
+}
+
+/** Generation status (backend generation OpportunityStatus): only VALIDATED and REFINED are accepted. */
+export function getGenerationStatusBadgeVariant(status: string | null | undefined): BadgeVariant {
+  if (status === 'VALIDATED' || status === 'REFINED') return 'status-positive';
+  if (status?.includes('INSUFFICIENTLY_DIFFERENTIATED')) return 'status-negative';
+  return 'neutral';
+}
+
+/** Research gap status (CANDIDATE / VALIDATED / REJECTED). */
+export function getGapStatusBadgeVariant(status: string | null | undefined): BadgeVariant {
+  if (status === 'VALIDATED') return 'status-positive';
+  if (status === 'REJECTED') return 'status-negative';
+  if (status === 'CANDIDATE') return 'status-warning';
+  return 'neutral';
+}
+
+/** OpenAlex ingestion status. */
+export function getIngestionStatusBadgeVariant(status: string | null | undefined): BadgeVariant {
+  if (status === 'INGESTED') return 'status-positive';
+  if (status === 'NO_PDF' || status === 'SKIPPED_DUPLICATE') return 'status-warning';
+  if (status === 'ERROR') return 'status-negative';
+  return 'neutral';
+}
+
+/** Post-ingestion evolution hook status. */
+export function getEvolutionHookBadgeVariant(status: string | null | undefined): BadgeVariant {
+  if (status === 'SUCCESS') return 'status-positive';
+  if (status === 'PARTIAL_SUCCESS') return 'status-warning';
+  if (status === 'FAILED') return 'status-negative';
+  return 'neutral';
 }

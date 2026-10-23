@@ -501,10 +501,178 @@ def test_alembic_migration_graph():
     script = ScriptDirectory.from_config(config)
 
     heads = script.get_heads()
-    assert heads == ["e7b3c9a14f52"], f"Expected single head, got {heads}"
+    assert heads == ["8b2c3d4e5f6a"], f"Expected single head, got {heads}"
+    assert script.get_revision("8b2c3d4e5f6a").down_revision == "7a1b2c3d4e5f"
+    assert script.get_revision("7a1b2c3d4e5f").down_revision == "e7b3c9a14f52"
     assert script.get_revision("e7b3c9a14f52").down_revision == "d5e8a71b2c40"
     assert script.get_revision("d5e8a71b2c40").down_revision == "b4e67f1a9c23"
 
     bridge_rev = script.get_revision("b4e67f1a9c23")
     assert bridge_rev is not None
     assert bridge_rev.down_revision == "a95f51a7e212"
+
+
+# ── Atomicity of generation persistence + lifecycle bridging ────────────────
+
+
+@pytest.fixture(params=[True, False], ids=["autoflush", "no_autoflush_like_production"])
+def atomic_session(request):
+    """Isolated SQLite session; also run with autoflush=False, matching ideagen.db.session."""
+    engine = create_engine("sqlite:///:memory:")
+
+    @event.listens_for(engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, autoflush=request.param)()
+    yield session
+    session.close()
+
+
+def _make_generation_dto(gap_id, direction="Atomic direction"):
+    return ResearchOpportunityDTO(
+        id=uuid.uuid4(),
+        gap_id=gap_id,
+        research_problem="Atomic problem",
+        identified_gap="Atomic gap",
+        proposed_research_direction=direction,
+        reasoning="Atomic reasoning",
+        technical_approach="Atomic approach",
+        expected_contribution="Atomic contribution",
+        feasibility=FeasibilityAssessment(
+            required_data="Data",
+            required_compute="Compute",
+            implementation_complexity="Low",
+            experimental_setup="Setup",
+        ),
+        novelty_assessment=NoveltyAssessment(
+            assessment="Potentially novel within the analyzed corpus",
+            reasoning="Reasoning",
+            differentiation="Differentiation",
+        ),
+        confidence=0.81,
+        supporting_statement_ids=[uuid.uuid4()],
+        supporting_paper_ids=[uuid.uuid4()],
+        prior_art_statement_ids=[],
+        status=GenerationStatus.VALIDATED,
+        created_at=datetime.utcnow(),
+        generation_model="test",
+        validation_model="test",
+        embedding_model="test",
+        refinement_iteration_count=1,
+        pipeline_version="v1.0",
+    )
+
+
+def _row_counts(session):
+    from ideagen.db.models import PriorArtAssessmentRecord, OpportunityRefinementRecord
+
+    return {
+        "research_opportunities": session.query(ResearchOpportunityRecord).count(),
+        "lifecycle_opportunities": session.query(Opportunity).count(),
+        "prior_art": session.query(PriorArtAssessmentRecord).count(),
+        "refinements": session.query(OpportunityRefinementRecord).count(),
+    }
+
+
+def test_bridge_failure_before_insert_rolls_back_generation_record(atomic_session, monkeypatch):
+    """A bridge error must not leave an unbridged generation record (or its children) committed."""
+    from ideagen.generation.models import PriorArtAssessment
+
+    session = atomic_session
+    gap = _create_test_gap(session)
+    p_layer = OpportunityPersistenceLayer(session)
+    earlier = p_layer.save_opportunity(_make_generation_dto(gap.id, "Earlier direction"), bridge=True)
+    before = _row_counts(session)
+
+    def failing_bridge(self, record, session=None, raise_on_ineligible=False):
+        raise RuntimeError("bridge unavailable")
+
+    monkeypatch.setattr(OpportunityBridgeService, "bridge_opportunity", failing_bridge)
+    dto = _make_generation_dto(gap.id)
+    with pytest.raises(RuntimeError, match="bridge unavailable"):
+        p_layer.save_opportunity(
+            dto,
+            assessments=[(0, PriorArtAssessment(assessment="LOW_OVERLAP", reasoning="r", differentiation="d"))],
+            iterations=[(1, "orig", "critique", "revised", "REFINED")],
+            bridge=True,
+        )
+
+    session.expire_all()
+    assert _row_counts(session) == before
+    assert session.get(ResearchOpportunityRecord, dto.id) is None
+    assert session.get(ResearchOpportunityRecord, earlier.id) is not None
+
+    # Session remains usable: a later save with a working bridge succeeds and is bridged.
+    monkeypatch.undo()
+    later = p_layer.save_opportunity(_make_generation_dto(gap.id, "Later direction"), bridge=True)
+    assert session.execute(
+        select(Opportunity).where(Opportunity.research_opportunity_id == later.id)
+    ).scalar_one().status == LifecycleStatus.OPEN.value
+
+
+def test_database_failure_during_bridge_flush_rolls_back_and_session_recovers(atomic_session, monkeypatch):
+    """A real IntegrityError while flushing the bridge must propagate, persist nothing new,
+    and leave the session usable (no PendingRollbackError on the next save)."""
+    from types import SimpleNamespace
+    import ideagen.opportunity.bridge as bridge_module
+
+    session = atomic_session
+    gap = _create_test_gap(session)
+    p_layer = OpportunityPersistenceLayer(session)
+    existing = p_layer.save_opportunity(_make_generation_dto(gap.id, "Existing direction"), bridge=True)
+    existing_lifecycle = session.execute(
+        select(Opportunity).where(Opportunity.research_opportunity_id == existing.id)
+    ).scalar_one()
+    before = _row_counts(session)
+
+    # Force the bridge to reuse an existing Opportunity primary key -> genuine IntegrityError on flush.
+    monkeypatch.setattr(bridge_module, "uuid", SimpleNamespace(uuid4=lambda: existing_lifecycle.id))
+    dto = _make_generation_dto(gap.id, "Colliding direction")
+    with pytest.raises(IntegrityError):
+        p_layer.save_opportunity(dto, bridge=True)
+    monkeypatch.undo()
+
+    session.expire_all()
+    assert _row_counts(session) == before
+    assert session.get(ResearchOpportunityRecord, dto.id) is None
+    unchanged = session.get(Opportunity, existing_lifecycle.id)
+    assert unchanged.research_opportunity_id == existing.id
+    assert unchanged.status == LifecycleStatus.OPEN.value
+
+    recovered = p_layer.save_opportunity(_make_generation_dto(gap.id, "Recovered direction"), bridge=True)
+    assert session.get(ResearchOpportunityRecord, recovered.id) is not None
+    assert _row_counts(session)["lifecycle_opportunities"] == before["lifecycle_opportunities"] + 1
+
+
+def test_successful_bridge_and_bridge_disabled_persist_expected_rows(atomic_session):
+    session = atomic_session
+    gap = _create_test_gap(session)
+    p_layer = OpportunityPersistenceLayer(session)
+
+    bridged = p_layer.save_opportunity(_make_generation_dto(gap.id, "Bridged direction"), bridge=True)
+    lifecycle = session.execute(
+        select(Opportunity).where(Opportunity.research_opportunity_id == bridged.id)
+    ).scalar_one()
+    assert lifecycle.status == LifecycleStatus.OPEN.value
+    assert lifecycle.gap_id == gap.id
+    assert lifecycle.title == "Bridged direction"
+    assert lifecycle.confidence == pytest.approx(0.81)
+
+    unbridged = p_layer.save_opportunity(_make_generation_dto(gap.id, "Unbridged direction"), bridge=False)
+    assert session.get(ResearchOpportunityRecord, unbridged.id) is not None
+    assert session.execute(
+        select(Opportunity).where(Opportunity.research_opportunity_id == unbridged.id)
+    ).scalar_one_or_none() is None
+
+    # Saving an ineligible (rejected) record with bridge=True commits it without a lifecycle entity.
+    rejected_dto = _make_generation_dto(gap.id, "Rejected direction")
+    rejected_dto.status = GenerationStatus.REJECTED_INSUFFICIENTLY_DIFFERENTIATED
+    rejected = p_layer.save_opportunity(rejected_dto, bridge=True)
+    assert session.get(ResearchOpportunityRecord, rejected.id) is not None
+    assert session.execute(
+        select(Opportunity).where(Opportunity.research_opportunity_id == rejected.id)
+    ).scalar_one_or_none() is None

@@ -36,6 +36,26 @@ cp .env.example .env
 pytest
 ```
 
+## Running Locally
+
+```bash
+make install   # backend/.venv + frontend node_modules (existing .env untouched)
+make dev       # backend :8000 + frontend :5173; Ctrl+C stops both
+make status    # who owns ports 8000/5173 (Makefile-managed or external)
+make test      # backend suite on temporary databases + frontend type check
+```
+
+- `make backend` / `make dev` default `IDEAGEN_DATABASE_URL` to `data/demo/ideagen_demo_20261022.db` (writable).
+  The test suite refuses to run against any SQLite file under `data/`.
+- **Start the servers from a regular terminal.** A backend launched from a sandboxed agent inherits its
+  `HTTP(S)_PROXY`; that policy proxy rejects OpenAlex ("not allowed by policy") and even the local Ollama port
+  ("Port 11434 not allowed"). A Vite server launched in a sandbox may be unable to connect to the backend
+  (`connect EPERM 127.0.0.1:8000`), which the UI reports as **API Offline**. The Makefile warns when proxy
+  variables are set; `NO_PROXY=localhost,127.0.0.1` keeps local Ollama traffic off a proxy.
+- Settings → *Application Settings & Diagnostics* shows the configured models and whether Ollama and the
+  required models are actually available (`GET /api/v1/system/status`).
+- Point a second frontend at another backend with `IDEAGEN_API_PROXY_TARGET=http://127.0.0.1:<port> npx vite --port <p>`.
+
 ## Current Status & Limitations
 
 - **Backend Pipeline & Explorer UI:** Core evidence-grounded research opportunity discovery, synthesis, and temporal evolution pipelines are implemented. A read-only React + Vite explorer interface is available for inspecting runs, opportunities, and statement provenance.

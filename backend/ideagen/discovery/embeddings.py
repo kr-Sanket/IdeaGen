@@ -15,6 +15,11 @@ from ideagen.core.config import get_settings
 logger = logging.getLogger(__name__)
 
 
+
+class EmbeddingProviderError(RuntimeError):
+    """Raised when the configured embedding provider is unreachable or returns an unusable response."""
+
+
 @runtime_checkable
 class EmbeddingProvider(Protocol):
     """Protocol for dense vector embedding generators."""
@@ -119,11 +124,13 @@ class OllamaEmbeddingProvider:
         model_name: str = "nomic-embed-text",
         dimension: int = 768,
         timeout: float = 60.0,
+        lifecycle_manager: Optional[Any] = None,
     ):
         self._base_url = base_url.rstrip("/")
         self._model_name = model_name
         self._dimension = dimension
         self._timeout = timeout
+        self._lifecycle_manager = lifecycle_manager
 
     @property
     def dimension(self) -> int:
@@ -133,11 +140,7 @@ class OllamaEmbeddingProvider:
     def model_name(self) -> str:
         return self._model_name
 
-    def embed_texts(self, texts: List[str]) -> np.ndarray:
-        """Embeds a list of texts and returns an (N, D) float32 numpy array with L2 normalization."""
-        if not texts:
-            return np.empty((0, self._dimension), dtype=np.float32)
-
+    def _execute_embed(self, texts: List[str]) -> np.ndarray:
         import requests
 
         clean_texts = [t.strip() if t and t.strip() else "statement" for t in texts]
@@ -163,10 +166,15 @@ class OllamaEmbeddingProvider:
                         timeout=self._timeout,
                     )
                     if r.status_code != 200:
-                        raise RuntimeError(f"Ollama embedding API error ({r.status_code}): {r.text}")
+                        body = " ".join((r.text or "").split())[:300]
+                        raise RuntimeError(f"Ollama embedding API error ({r.status_code}): {body}")
                     vectors.append(r.json()["embedding"])
         except Exception as e:
-            raise RuntimeError(f"Failed to generate Ollama embeddings: {e}") from e
+            from ideagen.core.network import proxy_hint
+            raise EmbeddingProviderError(
+                f"Failed to generate Ollama embeddings with {self._model_name} at {self._base_url}: {e}"
+                f"{proxy_hint(embed_url)}"
+            ) from e
 
         if not vectors or len(vectors) == 0:
             raise RuntimeError("Ollama embedding API returned no embeddings.")
@@ -188,17 +196,30 @@ class OllamaEmbeddingProvider:
         norms[norms == 0] = 1.0
         return arr / norms
 
+    def embed_texts(self, texts: List[str]) -> np.ndarray:
+        """Embeds a list of texts and returns an (N, D) float32 numpy array with L2 normalization."""
+        if not texts:
+            return np.empty((0, self._dimension), dtype=np.float32)
+
+        if self._lifecycle_manager is not None:
+            with self._lifecycle_manager.lease(required_models=[self._model_name]):
+                return self._execute_embed(texts)
+        return self._execute_embed(texts)
+
 
 def get_default_embedding_provider() -> EmbeddingProvider:
     """Returns the configured default embedding provider."""
     settings = get_settings()
     provider_name = (settings.embedding_provider or "ollama").lower()
     if provider_name == "ollama":
+        from ideagen.llm.ollama_lifecycle import get_ollama_lifecycle_manager
+        mgr = get_ollama_lifecycle_manager() if settings.ollama_auto_manage else None
         return OllamaEmbeddingProvider(
             base_url=settings.ollama_base_url,
             model_name=settings.ollama_embedding_model,
             dimension=settings.ollama_embedding_dimension,
             timeout=settings.ollama_timeout,
+            lifecycle_manager=mgr,
         )
     elif provider_name == "gemini":
         return GeminiEmbeddingProvider(api_key=settings.gemini_api_key or "")

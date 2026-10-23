@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, AliasChoices
+from pydantic import Field, AliasChoices, field_validator
+
+# Must match ideagen.opportunity.ranking.get_candidate_ranker.
+SUPPORTED_CANDIDATE_RANKING_STRATEGIES = frozenset({"tfidf", "fifo"})
 
 # Resolve the project root (backend/) relative to this file.
 _BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
@@ -52,6 +55,12 @@ class Settings(BaseSettings):
     ollama_embedding_dimension: int = Field(default=768, validation_alias=AliasChoices("IDEAGEN_OLLAMA_EMBEDDING_DIMENSION", "OLLAMA_EMBEDDING_DIMENSION"))
     ollama_timeout: float = Field(default=300.0, validation_alias=AliasChoices("IDEAGEN_OLLAMA_TIMEOUT", "OLLAMA_TIMEOUT"))
     ollama_num_ctx: int = Field(default=8192, validation_alias=AliasChoices("IDEAGEN_OLLAMA_NUM_CTX", "OLLAMA_NUM_CTX"))
+    ollama_num_predict: int = Field(default=512, validation_alias=AliasChoices("IDEAGEN_OLLAMA_NUM_PREDICT", "OLLAMA_NUM_PREDICT"))
+    ollama_auto_manage: bool = Field(default=True, validation_alias=AliasChoices("IDEAGEN_OLLAMA_AUTO_MANAGE", "OLLAMA_AUTO_MANAGE", "IDEAGEN_OLLAMA_AUTO_START"))
+    ollama_idle_timeout: float = Field(default=60.0, validation_alias=AliasChoices("IDEAGEN_OLLAMA_IDLE_TIMEOUT", "OLLAMA_IDLE_TIMEOUT"))
+    ollama_startup_timeout: float = Field(default=30.0, validation_alias=AliasChoices("IDEAGEN_OLLAMA_STARTUP_TIMEOUT", "OLLAMA_STARTUP_TIMEOUT"))
+    ollama_polling_interval: float = Field(default=0.5, validation_alias=AliasChoices("IDEAGEN_OLLAMA_POLLING_INTERVAL", "OLLAMA_POLLING_INTERVAL"))
+    ollama_binary_path: str = Field(default="ollama", validation_alias=AliasChoices("IDEAGEN_OLLAMA_BINARY_PATH", "OLLAMA_BINARY_PATH"))
 
     # ── Gemini (Preserved) ────────────────────────────────────────────
     gemini_api_key: str | None = Field(default=None, validation_alias=AliasChoices("IDEAGEN_GEMINI_API_KEY", "GEMINI_API_KEY"))
@@ -85,6 +94,18 @@ class Settings(BaseSettings):
             "CANDIDATE_RANKING_STRATEGY",
         ),
     )
+
+    @field_validator("candidate_ranking_strategy", mode="before")
+    @classmethod
+    def _validate_candidate_ranking_strategy(cls, value: object) -> str:
+        """Reject unknown strategies when settings load instead of on every ingestion."""
+        normalized = str(value).strip().lower() if value is not None else ""
+        if normalized not in SUPPORTED_CANDIDATE_RANKING_STRATEGIES:
+            raise ValueError(
+                f"Unsupported candidate ranking strategy {value!r}; "
+                f"expected one of {sorted(SUPPORTED_CANDIDATE_RANKING_STRATEGIES)}."
+            )
+        return normalized
 
     # ── Paths ─────────────────────────────────────────────────────────
     project_root: Path = _PROJECT_ROOT

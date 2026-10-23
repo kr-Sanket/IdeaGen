@@ -13,7 +13,7 @@ export const ErrorBanner: React.FC<ErrorBannerProps> = ({
   onRetry,
 }) => {
   return (
-    <div className="error-banner">
+    <div className="error-banner" role="alert">
       <div className="error-banner-content">
         <AlertCircle className="error-banner-icon" />
         <div>
@@ -22,7 +22,7 @@ export const ErrorBanner: React.FC<ErrorBannerProps> = ({
         </div>
       </div>
       {onRetry && (
-        <button onClick={onRetry} className="error-banner-retry-btn">
+        <button type="button" onClick={onRetry} className="error-banner-retry-btn">
           <RefreshCw size={14} />
           <span>Retry</span>
         </button>

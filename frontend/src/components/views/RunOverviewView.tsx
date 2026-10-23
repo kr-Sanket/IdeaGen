@@ -77,15 +77,15 @@ export const RunOverviewView: React.FC<RunOverviewViewProps> = ({ onNavigate }) 
       {/* View Header */}
       <div className="view-header">
         <div>
-          <h1 className="view-title">Completed Experiment Run Overview</h1>
+          <h1 className="view-title">Dashboard &amp; Run History</h1>
           <p className="view-subtitle">
-            Configuration parameters, temporal cutoffs, relevance screening decisions, and corpus entities.
+            Workspace metrics, temporal evaluation splits, relevance screening decisions, and run configuration history.
           </p>
         </div>
         <button
           onClick={fetchMetadata}
           className="btn btn-secondary"
-          title="Refresh metadata from read-only database"
+          title="Refresh run metadata"
         >
           <RefreshCw size={14} />
           <span>Refresh</span>
@@ -110,7 +110,7 @@ export const RunOverviewView: React.FC<RunOverviewViewProps> = ({ onNavigate }) 
 
       {/* Primary Metrics Grid */}
       <div className="grid-4-cols">
-        <div className="stat-card">
+        <div className="stat-card u-clickable" onClick={() => onNavigate('#/corpus')} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter') onNavigate('#/corpus'); }}>
           <div className="stat-card-header">
             <span className="stat-label">Corpus Papers</span>
             <FileText className="stat-icon tone-indigo" />
@@ -128,25 +128,25 @@ export const RunOverviewView: React.FC<RunOverviewViewProps> = ({ onNavigate }) 
           </div>
         </div>
 
-        <div className="stat-card">
+        <div className="stat-card u-clickable" onClick={() => onNavigate('#/corpus')} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter') onNavigate('#/corpus'); }}>
           <div className="stat-card-header">
             <span className="stat-label">Extracted Statements</span>
             <Layers className="stat-icon tone-cyan" />
           </div>
           <div className="stat-value">{counts ? counts.statements : metadata.total_statements}</div>
-          <div className="stat-sublabel">Statement records in database</div>
+          <div className="stat-sublabel">Statement records in database · Click to inspect</div>
         </div>
 
-        <div className="stat-card">
+        <div className="stat-card u-clickable" onClick={() => onNavigate('#/gaps')} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter') onNavigate('#/gaps'); }}>
           <div className="stat-card-header">
             <span className="stat-label">Research Gaps</span>
             <Sparkles className="stat-icon tone-amber" />
           </div>
           <div className="stat-value">{counts ? counts.research_gaps : metadata.total_gaps}</div>
-          <div className="stat-sublabel">Research gap records in database</div>
+          <div className="stat-sublabel">Research gap records in database · Click to view</div>
         </div>
 
-        <div className="stat-card">
+        <div className="stat-card u-clickable" onClick={() => onNavigate('#/opportunities')} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter') onNavigate('#/opportunities'); }}>
           <div className="stat-card-header">
             <span className="stat-label">Opportunities</span>
             <Activity className="stat-icon tone-indigo" />
@@ -155,7 +155,7 @@ export const RunOverviewView: React.FC<RunOverviewViewProps> = ({ onNavigate }) 
           <div className="stat-sublabel">
             {counts ? (
               <>
-                <span className="tone-indigo u-text-strong">{counts.evidence_records}</span> temporal evidence records
+                <span className="tone-indigo u-text-strong">{counts.evidence_records}</span> temporal evidence records · Click to explore
               </>
             ) : (
               <NotRecorded label="Evidence record count not recorded" />

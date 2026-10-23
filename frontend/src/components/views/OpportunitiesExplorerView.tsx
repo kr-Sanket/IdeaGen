@@ -7,13 +7,13 @@ import {
   Clock,
   RefreshCw
 } from 'lucide-react';
-import { LIFECYCLE_STATUSES, type LifecycleStatus, type OpportunitySummary } from '../../types';
+import { LIFECYCLE_STATUSES, type LifecycleStatus, type OpportunitySummary, type ResearchProject } from '../../types';
 import { api } from '../../api/client';
 import { LoadingState } from '../common/LoadingState';
 import { EmptyState } from '../common/EmptyState';
 import { ErrorBanner } from '../common/ErrorBanner';
 import { Badge } from '../common/Badge';
-import { getLifecycleBadgeVariant } from '../common/badgeVariants';
+import { getGenerationStatusBadgeVariant, getLifecycleBadgeVariant } from '../common/badgeVariants';
 import { NotRecorded } from '../common/NotRecorded';
 
 type StatusFilter = 'ALL' | LifecycleStatus | 'NOT_TRACKED';
@@ -27,10 +27,11 @@ function statusFilterLabel(filter: StatusFilter): string {
 }
 
 interface OpportunitiesExplorerViewProps {
+  project?: ResearchProject | null;
   onNavigate: (route: string) => void;
 }
 
-export const OpportunitiesExplorerView: React.FC<OpportunitiesExplorerViewProps> = ({ onNavigate }) => {
+export const OpportunitiesExplorerView: React.FC<OpportunitiesExplorerViewProps> = ({ project, onNavigate }) => {
   const [opportunities, setOpportunities] = useState<OpportunitySummary[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -42,11 +43,11 @@ export const OpportunitiesExplorerView: React.FC<OpportunitiesExplorerViewProps>
   const fetchOpportunities = useCallback(() => {
     setLoading(true);
     setError(null);
-    api.getOpportunities()
+    api.getOpportunities(project?.id)
       .then((data) => setOpportunities(data))
       .catch((err: Error) => setError(err.message || 'Failed to load research opportunities'))
       .finally(() => setLoading(false));
-  }, []);
+  }, [project?.id]);
 
   useEffect(() => {
     fetchOpportunities();
@@ -98,7 +99,7 @@ export const OpportunitiesExplorerView: React.FC<OpportunitiesExplorerViewProps>
             <span className="app-badge badge-neutral">{opportunities.length} Total</span>
           </div>
           <p className="view-subtitle">
-            Model-generated research proposals derived from research gap records, with temporal evidence from later-published papers where recorded.
+            Model-generated research proposals derived from validated research gaps. Accepted proposals (VALIDATED or REFINED) are tracked in the lifecycle and can be evolved with newer papers.
           </p>
         </div>
         <button
@@ -146,7 +147,17 @@ export const OpportunitiesExplorerView: React.FC<OpportunitiesExplorerViewProps>
       </div>
 
       {/* Opportunities List */}
-      {filtered.length === 0 ? (
+      {opportunities.length === 0 ? (
+        <EmptyState
+          title="No opportunities yet"
+          description="Generate an opportunity from a VALIDATED research gap; it will appear here."
+          action={
+            <button onClick={() => onNavigate('#/gaps')} className="btn btn-secondary">
+              Go to Research Gaps
+            </button>
+          }
+        />
+      ) : filtered.length === 0 ? (
         <EmptyState
           title="No Matching Opportunities"
           description={searchQuery ? `No opportunity proposals matched "${searchQuery}".` : 'No opportunities match the selected lifecycle filter.'}
@@ -170,16 +181,19 @@ export const OpportunitiesExplorerView: React.FC<OpportunitiesExplorerViewProps>
                       variant={getLifecycleBadgeVariant(lifecycleStatus)}
                     />
                     <Badge
-                      label={`Pipeline: ${opp.status || 'Not recorded'}`}
-                      variant="neutral"
+                      label={`Generation: ${opp.status || 'Not recorded'}`}
+                      variant={getGenerationStatusBadgeVariant(opp.status)}
                     />
                     <Badge
                       label="Model-Generated Proposal"
                       variant="model-generated"
                     />
                   </div>
-                  <span className="u-mono u-text-xs u-text-tertiary">
-                    ID: {opp.id.slice(0, 8)}...
+                  <span className="u-mono u-text-xs u-text-tertiary opportunity-card-ids">
+                    <span title={opp.id}>Generation {opp.id.slice(0, 8)}…</span>
+                    <span title={opp.lifecycle_opportunity_id ?? undefined}>
+                      Lifecycle {opp.lifecycle_opportunity_id ? `${opp.lifecycle_opportunity_id.slice(0, 8)}…` : '—'}
+                    </span>
                   </span>
                 </div>
 
@@ -206,9 +220,9 @@ export const OpportunitiesExplorerView: React.FC<OpportunitiesExplorerViewProps>
                 {/* Card Footer: Metadata & Inspect Button */}
                 <div className="opportunity-card-footer">
                   <div className="opportunity-meta-stats">
-                    <span className="meta-stat-pill" title="Temporal evidence events linked to this proposal">
+                    <span className="meta-stat-pill" title="Evidence records linked to the lifecycle opportunity">
                       <Clock size={14} className="tone-indigo" />
-                      <span>{opp.evidence_count} Temporal Evidence Records</span>
+                      <span>{opp.evidence_count} Evidence Records</span>
                     </span>
                     <span className="meta-stat-pill" title="Supporting statements linked to this proposal">
                       <Layers size={14} />
@@ -220,7 +234,7 @@ export const OpportunitiesExplorerView: React.FC<OpportunitiesExplorerViewProps>
                     onClick={() => onNavigate(`#/opportunities/${opp.id}`)}
                     className="btn btn-primary btn-sm"
                   >
-                    <span>View Detail & Evolution</span>
+                    <span>{opp.lifecycle_opportunity_id ? 'View & Evolve' : 'View Report'}</span>
                     <ArrowRight size={14} />
                   </button>
                 </div>

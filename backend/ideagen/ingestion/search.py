@@ -12,6 +12,7 @@ import re
 import time
 
 from ideagen.core.config import get_settings
+from ideagen.core.network import looks_like_proxy_denial, proxy_hint
 from ideagen.ingestion.parser import PaperNormalizer, OpenAlexResponseParser
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,26 @@ _DOI_RE = re.compile(r"^10\.\d{4,9}/\S+$")
 
 # Upper bound for any single retry wait (including server-supplied Retry-After).
 MAX_RETRY_DELAY_SECONDS = 10.0
+# Upstream bodies are logged and surfaced only in truncated form.
+MAX_BODY_EXCERPT_CHARS = 200
+
+
+def _excerpt(text: str) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= MAX_BODY_EXCERPT_CHARS else text[:MAX_BODY_EXCERPT_CHARS] + "..."
+
+
+def _openalex_error_message(body_text: str) -> str:
+    """Extracts OpenAlex's own error message from a JSON error body (never the raw body)."""
+    try:
+        data = json.loads(body_text)
+    except (ValueError, TypeError):
+        return ""
+    if isinstance(data, dict):
+        for key in ("message", "error"):
+            if isinstance(data.get(key), str):
+                return _excerpt(data[key])
+    return ""
 
 
 class PaperSearchResult(BaseModel):
@@ -53,9 +74,25 @@ class PaperSearchProvider(Protocol):
         ...
 
 
+import socket
+
 class OpenAlexSearchError(Exception):
     """Exception raised when an OpenAlex search request fails."""
-    pass
+
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 502,
+        error_category: str = "upstream_error",
+        is_proxy_block: bool = False,
+        response_body: Optional[str] = None,
+    ):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.error_category = error_category
+        self.is_proxy_block = is_proxy_block
+        self.response_body = response_body
 
 
 class OpenAlexSearchProvider:
@@ -133,13 +170,41 @@ class OpenAlexSearchProvider:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                     if resp.status == 200:
                         raw = resp.read().decode("utf-8")
-                        return json.loads(raw)
+                        try:
+                            return json.loads(raw)
+                        except json.JSONDecodeError as decode_err:
+                            logger.warning(f"OpenAlex returned malformed JSON: {decode_err}")
+                            if self.raise_on_error:
+                                raise OpenAlexSearchError(
+                                    "Received an invalid or malformed response from OpenAlex.",
+                                    status_code=502,
+                                    error_category="malformed_response",
+                                    response_body=_excerpt(raw),
+                                ) from decode_err
+                            return None
                     if self.raise_on_error:
-                        raise OpenAlexSearchError(f"Unexpected status: {resp.status}")
+                        raise OpenAlexSearchError(
+                            f"Unexpected status: {resp.status}",
+                            status_code=resp.status if resp.status in (400, 403, 404, 429, 502, 503, 504) else 502,
+                            error_category="upstream_error",
+                        )
                     return None
             except urllib.error.HTTPError as e:
                 last_error = e
-                if e.code in (429, 500, 502, 503, 504):
+                body_text = ""
+                try:
+                    body_bytes = e.read()
+                    if body_bytes:
+                        body_text = body_bytes.decode("utf-8", errors="replace").strip()
+                except Exception:
+                    pass
+
+                # Distinguish an intermediary policy proxy's rejection from OpenAlex's own errors.
+                # Generic words such as "gateway" are not evidence: OpenAlex's 502/504 bodies say
+                # "Bad Gateway"/"Gateway Timeout" and must stay retryable upstream errors.
+                is_proxy = looks_like_proxy_denial(body_text)
+
+                if e.code in (429, 500, 502, 503, 504) and not is_proxy:
                     if attempt >= self.max_retries - 1:
                         break  # no further attempt; don't sleep for nothing
                     retry_after = e.headers.get("Retry-After") if e.code == 429 and e.headers else None
@@ -153,28 +218,113 @@ class OpenAlexSearchProvider:
                     time.sleep(delay)
                     continue
                 else:
-                    logger.warning(f"OpenAlex search HTTP error {e.code}: {e.reason}")
-                    if self.raise_on_error:
-                        raise OpenAlexSearchError(f"HTTP Error {e.code}: {e.reason}") from e
+                    if is_proxy:
+                        logger.warning(f"OpenAlex outbound request blocked by network proxy/policy: {_excerpt(body_text) or e.reason}")
+                        if self.raise_on_error:
+                            raise OpenAlexSearchError(
+                                "Network proxy or policy blocked request to api.openalex.org: "
+                                f"{_excerpt(body_text) or e.reason} (HTTP {e.code}).{proxy_hint(url)}",
+                                status_code=502,
+                                error_category="proxy_policy_block",
+                                is_proxy_block=True,
+                                response_body=_excerpt(body_text),
+                            ) from e
+                    elif e.code == 403:
+                        logger.warning(f"OpenAlex search HTTP 403 Forbidden: {_excerpt(body_text) or e.reason}")
+                        if self.raise_on_error:
+                            raise OpenAlexSearchError(
+                                f"OpenAlex access forbidden (HTTP 403).{proxy_hint(url)}",
+                                status_code=403,
+                                error_category="client_forbidden",
+                                response_body=_excerpt(body_text),
+                            ) from e
+                    elif e.code == 429:
+                        logger.warning("OpenAlex search HTTP 429 Rate Limited")
+                        if self.raise_on_error:
+                            raise OpenAlexSearchError(
+                                "OpenAlex rate limit exceeded (HTTP 429). Please wait a moment before searching again.",
+                                status_code=429,
+                                error_category="rate_limited",
+                                response_body=_excerpt(body_text),
+                            ) from e
+                    elif e.code in (500, 502, 503, 504):
+                        logger.warning(f"OpenAlex search upstream unavailable ({e.code}): {_excerpt(body_text) or e.reason}")
+                        if self.raise_on_error:
+                            raise OpenAlexSearchError(
+                                f"OpenAlex service is temporarily unavailable (HTTP {e.code}). Please retry shortly.",
+                                status_code=502,
+                                error_category="service_unavailable",
+                                response_body=_excerpt(body_text),
+                            ) from e
+                    else:
+                        logger.warning(f"OpenAlex search HTTP error {e.code}: {e.reason} {_excerpt(body_text)}")
+                        if self.raise_on_error:
+                            detail = _openalex_error_message(body_text) or str(e.reason)
+                            raise OpenAlexSearchError(
+                                f"OpenAlex rejected the request (HTTP {e.code}): {detail}",
+                                status_code=e.code if e.code in (400, 404) else 502,
+                                error_category="invalid_request" if e.code == 400 else "upstream_error",
+                                response_body=_excerpt(body_text),
+                            ) from e
                     return None
-            except (urllib.error.URLError, TimeoutError) as e:
+            except (TimeoutError, socket.timeout) as e:
                 last_error = e
-                logger.warning(f"OpenAlex search network error: {e}")
+                logger.warning(f"OpenAlex search timeout: {e}")
                 if attempt < self.max_retries - 1:
                     time.sleep(base_delay * (2 ** attempt))
                     continue
                 if self.raise_on_error:
-                    raise OpenAlexSearchError(f"Network error: {e}") from e
+                    raise OpenAlexSearchError(
+                        f"Connection to OpenAlex timed out. Please check your network connection and retry.{proxy_hint(url)}",
+                        status_code=504,
+                        error_category="network_timeout",
+                    ) from e
                 return None
+            except urllib.error.URLError as e:
+                last_error = e
+                logger.warning(f"OpenAlex search network error: {e}")
+                reason_str = str(e.reason) if hasattr(e, "reason") else str(e)
+                if attempt < self.max_retries - 1 and "nodename nor servname" not in reason_str:
+                    time.sleep(base_delay * (2 ** attempt))
+                    continue
+                if self.raise_on_error:
+                    raise OpenAlexSearchError(
+                        f"Network error contacting api.openalex.org: {reason_str}.{proxy_hint(url)}",
+                        status_code=502,
+                        error_category="network_error",
+                    ) from e
+                return None
+            except OpenAlexSearchError:
+                raise
             except Exception as e:
                 last_error = e
                 logger.warning(f"OpenAlex search unexpected error: {e}")
                 if self.raise_on_error:
-                    raise OpenAlexSearchError(f"Unexpected error: {e}") from e
+                    raise OpenAlexSearchError(
+                        f"Unexpected error: {e}",
+                        status_code=500,
+                        error_category="unexpected_error",
+                    ) from e
                 return None
 
         if self.raise_on_error and last_error is not None:
-            raise OpenAlexSearchError(f"Max retries exceeded: {last_error}")
+            if isinstance(last_error, urllib.error.HTTPError):
+                if last_error.code == 429:
+                    raise OpenAlexSearchError(
+                        "OpenAlex rate limit exceeded (HTTP 429). Please wait a moment before searching again.",
+                        status_code=429,
+                        error_category="rate_limited",
+                    )
+                raise OpenAlexSearchError(
+                    f"OpenAlex service is temporarily unavailable (HTTP {last_error.code}). Please retry shortly.",
+                    status_code=502,
+                    error_category="service_unavailable",
+                )
+            raise OpenAlexSearchError(
+                f"Max retries exceeded: {last_error}",
+                status_code=502,
+                error_category="max_retries_exceeded",
+            )
         return None
 
     def _parse_work_to_result(self, work: Dict[str, Any]) -> PaperSearchResult:

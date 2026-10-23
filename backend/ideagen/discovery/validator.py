@@ -107,12 +107,21 @@ def _resolve_passage_text(
     return clean_text
 
 
+DEFAULT_MAX_EVIDENCE_PER_CANDIDATE = 3
+
+
 class GapValidator:
     """Validates candidate research gaps using an LLM and verifies evidence integrity."""
 
-    def __init__(self, provider: LLMProvider, min_valid_evidence: int = 1):
+    def __init__(
+        self,
+        provider: LLMProvider,
+        min_valid_evidence: int = 1,
+        max_evidence_per_candidate: int = DEFAULT_MAX_EVIDENCE_PER_CANDIDATE,
+    ):
         self.provider = provider
         self.min_valid_evidence = min_valid_evidence
+        self.max_evidence_per_candidate = max_evidence_per_candidate
 
     def validate_candidate(
         self,
@@ -122,26 +131,10 @@ class GapValidator:
     ) -> ResearchGapCreateDTO:
         """Validates a candidate gap, enforces evidence integrity, and produces a persistable DTO."""
         # 1. Format evidence statements
-        evidence_lines = []
-        valid_evidence_pool: Set[uuid.UUID] = set()
-
-        for s_id in candidate.supporting_statement_ids:
-            if s_id in statements_by_id:
-                s = statements_by_id[s_id]
-                valid_evidence_pool.add(s_id)
-                p_id = s.paper_id if hasattr(s, "paper_id") else s["paper_id"]
-                st_type = s.statement_type if hasattr(s, "statement_type") else s["statement_type"]
-                text = s.statement_text if hasattr(s, "statement_text") else s["statement_text"]
-                sec = s.section if hasattr(s, "section") else s.get("section")
-                passage_text = _resolve_passage_text(s, passages_by_id=passages_by_id)
-
-                evidence_lines.append(
-                    f"- [ID: {s_id} | Paper: {p_id} | Type: {st_type} | Section: {sec or 'N/A'}]\n"
-                    f"  Statement: \"{text}\"\n"
-                    f"  Original Source Passage: {passage_text}"
-                )
-
-        if not evidence_lines:
+        available_statement_ids = [
+            s_id for s_id in candidate.supporting_statement_ids if s_id in statements_by_id
+        ]
+        if not available_statement_ids:
             # Candidate has zero valid statements
             return ResearchGapCreateDTO(
                 gap_statement=candidate.gap_statement,
@@ -158,6 +151,40 @@ class GapValidator:
                 metadata={"rejection_reason": "EMPTY_EVIDENCE"},
             )
 
+        # Bound evidence statements for validation prompt
+        if self.max_evidence_per_candidate and len(available_statement_ids) > self.max_evidence_per_candidate:
+            bounded_stmt_ids = available_statement_ids[:self.max_evidence_per_candidate]
+        else:
+            bounded_stmt_ids = available_statement_ids
+
+        evidence_lines = []
+        valid_evidence_pool: Set[uuid.UUID] = set(bounded_stmt_ids)
+        seen_passage_provenance: Dict[str, uuid.UUID] = {}
+
+        for s_id in bounded_stmt_ids:
+            s = statements_by_id[s_id]
+            p_id = s.paper_id if hasattr(s, "paper_id") else s["paper_id"]
+            st_type = s.statement_type if hasattr(s, "statement_type") else s["statement_type"]
+            text = s.statement_text if hasattr(s, "statement_text") else s["statement_text"]
+            sec = s.section if hasattr(s, "section") else s.get("section")
+            raw_pid = getattr(s, "passage_id", None) if hasattr(s, "passage_id") else (
+                s.get("passage_id") if isinstance(s, dict) else None
+            )
+
+            passage_key = str(raw_pid).strip() if raw_pid else f"stmt_{s_id}"
+            if passage_key in seen_passage_provenance:
+                first_s_id = seen_passage_provenance[passage_key]
+                passage_text = f"[Same source passage as statement {first_s_id} above]"
+            else:
+                seen_passage_provenance[passage_key] = s_id
+                passage_text = _resolve_passage_text(s, passages_by_id=passages_by_id)
+
+            evidence_lines.append(
+                f"- [ID: {s_id} | Paper: {p_id} | Type: {st_type} | Section: {sec or 'N/A'}]\n"
+                f"  Statement: \"{text}\"\n"
+                f"  Original Source Passage: {passage_text}"
+            )
+
         prompt = VALIDATION_PROMPT.format(
             gap_statement=candidate.gap_statement,
             research_problem=candidate.research_problem,
@@ -171,7 +198,11 @@ class GapValidator:
                 prompt=prompt,
                 response_schema=GapValidationResult,
             )
-        except (ProviderFailureError, MalformedResponseError, Exception) as e:
+        except ProviderFailureError:
+            # Propagate infrastructure/provider failures (timeouts, network errors, 5xx)
+            # rather than masking them as scientific domain-level rejections.
+            raise
+        except (MalformedResponseError, Exception) as e:
             logger.error(f"Gap validation failed during model execution: {e}")
             return ResearchGapCreateDTO(
                 gap_statement=candidate.gap_statement,
@@ -281,6 +312,9 @@ class GapValidator:
         }
         if rejection_reason_code:
             metadata["rejection_reason"] = rejection_reason_code
+        if len(candidate.supporting_statement_ids) > len(bounded_stmt_ids):
+            metadata["total_candidate_evidence_count"] = len(candidate.supporting_statement_ids)
+            metadata["evaluated_evidence_count"] = len(bounded_stmt_ids)
 
         return ResearchGapCreateDTO(
             gap_statement=candidate.gap_statement,

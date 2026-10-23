@@ -16,6 +16,11 @@ from .models import (
     PriorArtAssessmentRecord,
     OpportunityRefinementRecord,
     ExperimentMetadataRecord,
+    ResearchProjectRecord,
+    ProjectPaperSelectionRecord,
+    ResearchRunRecord,
+    RunPaperRecord,
+    ProjectPaperRecord,
 )
 from .persistence import SQLAlchemyPersistenceLayer
 from .session import get_db, get_engine, get_session_factory
@@ -36,6 +41,11 @@ __all__ = [
     "PriorArtAssessmentRecord",
     "OpportunityRefinementRecord",
     "ExperimentMetadataRecord",
+    "ResearchProjectRecord",
+    "ProjectPaperSelectionRecord",
+    "ResearchRunRecord",
+    "RunPaperRecord",
+    "ProjectPaperRecord",
     "SQLAlchemyPersistenceLayer",
     "engine",
     "SessionLocal",

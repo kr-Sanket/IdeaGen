@@ -344,9 +344,14 @@ class SQLAlchemyPersistenceLayer:
 
         return list(self.session.scalars(stmt).unique().all())
 
-    def save_research_gap(self, dto: 'ideagen.discovery.models.ResearchGapCreateDTO') -> uuid.UUID:
+    def save_research_gap(
+        self,
+        dto: 'ideagen.discovery.models.ResearchGapCreateDTO',
+        project_id: Optional[str] = None,
+    ) -> uuid.UUID:
         from .models import ResearchGap, GapEvidence
         gap = ResearchGap(
+            project_id=project_id,
             gap_statement=dto.gap_statement,
             research_problem=dto.research_problem,
             status=dto.status.value if hasattr(dto.status, "value") else dto.status,

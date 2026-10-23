@@ -318,11 +318,15 @@ export interface StatementItem {
   passage_text?: string | null;
 }
 
+/** Research gap status (backend/ideagen/discovery/models.py GapStatus). */
+export type GapStatus = 'CANDIDATE' | 'VALIDATED' | 'REJECTED';
+
+/** ResearchGapResponseDTO (backend/ideagen/discovery/models.py). */
 export interface GapItem {
   id: string;
   gap_statement: string;
   research_problem: string;
-  status: string;
+  status: GapStatus | string;
   evidence_count: number;
   supporting_statement_ids: string[];
   supporting_paper_ids: string[];
@@ -331,4 +335,371 @@ export interface GapItem {
   validation_reasoning?: string | null;
   validation_confidence?: number | null;
   created_at?: string | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+// ── Workflow actions (POST endpoints) ───────────────────────────────────
+
+/** OpenAlexPaperResultDTO (GET /api/v1/search/openalex). */
+export interface OpenAlexPaper {
+  id: string;
+  doi: string | null;
+  title: string;
+  authors: string[];
+  publication_year: number | null;
+  publication_date: string | null;
+  abstract: string;
+  is_oa: boolean | null;
+  pdf_url: string | null;
+  landing_page_url: string | null;
+  citation_count: number | null;
+}
+
+/** OpenAlexSearchResponse. */
+export interface OpenAlexSearchResponse {
+  query: string;
+  source: string;
+  count: number;
+  total_count: number | null;
+  papers: OpenAlexPaper[];
+}
+
+export interface OpenAlexSearchParams {
+  query: string;
+  limit?: number;
+  startDate?: string;
+  endDate?: string;
+}
+
+/** IngestionStatus (backend/ideagen/ingestion/openalex_ingestion.py). */
+export type IngestionStatus = 'INGESTED' | 'NO_PDF' | 'SKIPPED_DUPLICATE' | 'ERROR';
+
+/** EvolutionHookStatus (backend/ideagen/ingestion/openalex_ingestion.py). */
+export type EvolutionHookStatus = 'DISABLED' | 'SUCCESS' | 'PARTIAL_SUCCESS' | 'FAILED' | 'SKIPPED';
+
+/** One per-opportunity outcome inside _format_evolution_result. */
+export interface IncrementalEvolutionOutcome {
+  opportunity_id: string;
+  status: string;
+  initial_status: string | null;
+  final_status: string | null;
+  relationship: string | null;
+  state_changed: boolean;
+  evidence_id: string | null;
+  history_id: string | null;
+  skip_reason: string | null;
+  error_message: string | null;
+}
+
+/** Post-ingestion evolution result (main.py _format_evolution_result); may also be a raw error dict. */
+export interface IncrementalEvolutionResult {
+  paper_id?: string;
+  run_status?: string;
+  paper_title?: string | null;
+  publication_date?: string | null;
+  candidate_count?: number;
+  evaluated_count?: number;
+  skipped_count?: number;
+  grounding_rejected_count?: number;
+  failed_count?: number;
+  outcomes?: IncrementalEvolutionOutcome[];
+  error?: string | null;
+  [key: string]: unknown;
+}
+
+/** OpenAlexIngestResponse (POST /api/v1/papers/ingest/openalex). */
+export interface OpenAlexIngestResponse {
+  paper_id: string | null;
+  source_id: string;
+  status: IngestionStatus | string;
+  has_pdf: boolean;
+  document_id: string | null;
+  passage_count: number;
+  error_message: string | null;
+  batch_id: string;
+  doi: string | null;
+  evolution_status: EvolutionHookStatus | string | null;
+  evolution_result: IncrementalEvolutionResult | null;
+  project_id?: string | null;
+  project_associated?: boolean;
+  already_in_project?: boolean;
+}
+
+/** ResearchKnowledgeResponseDTO (POST /api/v1/papers/{id}/understand). */
+export interface ResearchKnowledge {
+  id: string;
+  paper_id: string;
+  research_problem: string | null;
+  research_questions: string[];
+  methodology: string | null;
+  datasets: string[];
+  findings: string[];
+  limitations: string[];
+  future_work: string[];
+  statement_count: number;
+  model_name: string;
+  extraction_schema_version: string;
+  extracted_at: string;
+  extraction_status: string;
+  error_message: string | null;
+}
+
+/** OpportunityEvolveRequest. */
+export interface OpportunityEvolveRequest {
+  paper_ids: string[];
+  cutoff_date?: string;
+}
+
+/** OpportunityEvolutionEventDTO. */
+export interface OpportunityEvolutionEvent {
+  paper_id: string;
+  relationship: string;
+  previous_status: string;
+  new_status: string;
+  state_changed: boolean;
+  evidence_id: string | null;
+  history_id: string | null;
+}
+
+/** OpportunityEvolveResponse. opportunity_id is always the lifecycle Opportunity id. */
+export interface OpportunityEvolveResponse {
+  opportunity_id: string;
+  initial_status: string;
+  final_status: string;
+  processed_count: number;
+  skipped_count: number;
+  failed_count: number;
+  events: OpportunityEvolutionEvent[];
+  errors: { paper_id: string; reason: string }[];
+}
+
+// ── Workspace & Multi-Project Types ─────────────────────────────────────
+
+export interface WorkspaceStats {
+  total_papers: number;
+  analyzed_papers: number;
+  total_passages: number;
+  total_statements: number;
+  total_gaps: number;
+  candidate_gaps: number;
+  validated_gaps: number;
+  rejected_gaps: number;
+  total_opportunities: number;
+  validated_opportunities: number;
+  analysis_status: string;
+}
+
+export type ProjectStatus = 'ACTIVE' | 'ARCHIVED' | 'DRAFT';
+
+/** A research project as stored by the backend (GET/POST /api/v1/projects). */
+export interface ProjectRecord {
+  id: string;
+  title: string;
+  topic: string | null;
+  description: string | null;
+  temporal_cutoff: string | null;
+  status: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  /** Papers in the project's corpus (project_papers). */
+  paper_count: number;
+  /** Papers queued for the next research run. */
+  selection_count: number;
+  gap_count: number;
+  opportunity_count: number;
+  run_count: number;
+}
+
+export interface ProjectCreateRequest {
+  id: string;
+  title: string;
+  topic?: string;
+  description?: string;
+  temporal_cutoff?: string;
+}
+
+export type BackendHealth = 'online' | 'degraded' | 'unreachable';
+
+/** GET /api/v1/system/status: configured providers and live availability (no secrets). */
+export interface SystemStatus {
+  database: { connected: boolean; dialect: string | null };
+  llm: { provider: string; model: string | null; base_url: string | null; api_key_configured?: boolean };
+  embedding: { provider: string; model: string | null; dimension: number | null; base_url: string | null };
+  ollama: {
+    reachable: boolean;
+    installed_models: string[];
+    missing_models: string[];
+    error: string | null;
+  } | null;
+  openalex: { email_configured: boolean; proxy: string | null };
+}
+
+export interface ResearchProject {
+  id: string;
+  name: string;
+  topic: string;
+  description: string;
+  createdAt: string;
+  updatedAt: string;
+  status: ProjectStatus;
+  temporalCutoff?: string;
+  isDefaultBenchmark?: boolean;
+}
+
+export interface ProjectActivityItem {
+  id: string;
+  timestamp: string;
+  type: 'EVOLUTION' | 'INGESTION' | 'UNDERSTANDING' | 'GAP_DISCOVERY' | 'OPPORTUNITY_GENERATION';
+  title: string;
+  description: string;
+  targetId?: string;
+  badgeText?: string;
+  badgeVariant?: 'default' | 'success' | 'warning' | 'info';
+}
+
+export interface ProjectAttentionRun {
+  runId: string;
+  title: string;
+  status: 'AWAITING_REVIEW' | 'FAILED' | 'INTERRUPTED' | 'READY';
+  description: string;
+  actionLabel: string;
+  actionRoute: string;
+}
+
+// ── Phase 3 Research Workflow & Execution Types ─────────────────────────
+
+export interface ProjectPaperSelectionItem {
+  id?: string;
+  project_id?: string;
+  openalex_id: string;
+  paper_id?: string;
+  doi?: string | null;
+  title: string;
+  authors?: string[];
+  publication_year?: number | null;
+  abstract?: string | null;
+  pdf_url?: string | null;
+  landing_page_url?: string | null;
+  has_pdf?: boolean;
+  selected_at?: string;
+}
+
+export type PreflightPaperStatus = 'NEW' | 'CORPUS_MATCH' | 'NO_PDF' | 'METADATA_ONLY';
+
+export interface PreflightPaperItem {
+  openalex_id: string;
+  paper_id?: string;
+  doi?: string | null;
+  title: string;
+  authors: string[];
+  publication_year?: number | null;
+  has_pdf: boolean;
+  pdf_url?: string | null;
+  status: PreflightPaperStatus;
+  corpus_paper_id?: string | null;
+  warning?: string | null;
+  is_pre_cutoff?: boolean;
+}
+
+export interface PreflightStageItem {
+  stage_id: string;
+  stage?: string;
+  name: string;
+  description: string;
+  estimated_action?: string;
+}
+
+/** Papers already in the project corpus; a run processes them in addition to queued selections. */
+export interface PreflightCorpus {
+  total: number;
+  with_passages: number;
+  statements_extracted: number;
+  pending_extraction: number;
+  metadata_only: number;
+}
+
+export interface PreflightResponse {
+  project_id: string;
+  corpus?: PreflightCorpus | null;
+  /** True when the run has something to process (queued selections or a non-empty corpus). */
+  runnable?: boolean;
+  total_selected: number;
+  new_papers: number;
+  corpus_matches: number;
+  pdf_available: number;
+  metadata_only: number;
+  papers: PreflightPaperItem[];
+  planned_stages: PreflightStageItem[];
+  warnings: string[];
+  summary?: {
+    total_selected: number;
+    new_papers: number;
+    corpus_matches: number;
+    has_pdf: number;
+    metadata_only: number;
+  };
+}
+
+export type RunStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'PARTIAL_SUCCESS' | 'FAILED' | 'AWAITING_REVIEW' | 'INTERRUPTED';
+
+export interface RunPaper {
+  id: string;
+  openalex_id: string;
+  paper_id?: string;
+  doi?: string | null;
+  title: string;
+  status: string;
+  corpus_paper_id?: string | null;
+  has_pdf: boolean;
+  error_message?: string | null;
+  passages_count: number;
+  statements_count: number;
+}
+
+export interface RunStage {
+  stage_id: string;
+  stage?: string;
+  name: string;
+  status: 'PENDING' | 'RUNNING' | 'COMPLETED' | 'PARTIAL_SUCCESS' | 'FAILED' | 'SKIPPED' | 'INTERRUPTED';
+  message?: string | null;
+  error?: string | null;
+}
+
+export interface RunSummary {
+  total_papers: number;
+  completed_papers: number;
+  successful_papers: number;
+  failed_papers: number;
+  failed_stages?: string[];
+  total_statements: number;
+  next_actions: string[];
+  completed_at?: string;
+}
+
+export interface ResearchRun {
+  id: string;
+  project_id: string;
+  status: RunStatus;
+  current_stage?: string | null;
+  stage_progress?: any;
+  created_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  error_message?: string | null;
+  summary?: any;
+  papers: RunPaper[];
+  stages: RunStage[];
+}
+
+export interface RunLogEntry {
+  timestamp: string;
+  level: 'INFO' | 'WARNING' | 'ERROR' | 'DEBUG';
+  stage: string;
+  message: string;
+}
+
+export interface RunLogsResponse {
+  run_id: string;
+  status: string;
+  logs: RunLogEntry[];
 }

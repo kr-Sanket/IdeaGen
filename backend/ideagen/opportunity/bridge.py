@@ -128,8 +128,16 @@ class OpportunityBridgeService:
         gap_id = getattr(record, "gap_id", None)
         rec_created_at = getattr(record, "created_at", None)
 
+        project_id = getattr(record, "project_id", None)
+        if not project_id and gap_id:
+            from ideagen.db.models import ResearchGap
+            gap_rec = db.get(ResearchGap, gap_id)
+            if gap_rec and getattr(gap_rec, "project_id", None):
+                project_id = gap_rec.project_id
+
         opp_kwargs = {
             "id": uuid.uuid4(),
+            "project_id": project_id,
             "research_opportunity_id": source_id,
             "gap_id": gap_id,
             "title": title,

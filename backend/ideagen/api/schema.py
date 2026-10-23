@@ -337,6 +337,10 @@ class OpenAlexIngestRequest(BaseModel):
         None,
         description="Digital Object Identifier (e.g. '10.48550/arxiv.2005.11401' or 'https://doi.org/...')",
     )
+    project_id: Optional[str] = Field(
+        None,
+        description="Optional research project ID to automatically associate this paper with in project_papers",
+    )
     enable_evolution: Optional[bool] = Field(
         None,
         description=(
@@ -364,6 +368,9 @@ class OpenAlexIngestResponse(BaseModel):
     evolution_result: Optional[Dict[str, Any]] = Field(
         None, description="Structured outcome from IncrementalOpportunityEvolutionService if evolution was triggered"
     )
+    project_id: Optional[str] = Field(None, description="Project ID associated with this paper if requested")
+    project_associated: bool = Field(False, description="True if paper was newly or previously associated with the project")
+    already_in_project: bool = Field(False, description="True if paper was already associated with this project prior to this request")
 
 
 # ── OpenAlex Search DTOs (Stage 6B) ──────────────────────────────────────
@@ -388,3 +395,147 @@ class OpenAlexSearchResponse(BaseModel):
     count: int = Field(..., description="Number of paper results returned in this batch")
     total_count: Optional[int] = Field(None, description="Upstream OpenAlex total matching hit count if reported by provider")
     papers: List[OpenAlexPaperResultDTO] = Field(default_factory=list, description="List of matching paper results")
+
+
+# ── Project, Selection, Preflight, and Run DTOs (Phase 3) ───────────────
+
+class ProjectDTO(BaseModel):
+    id: str
+    title: str
+    topic: Optional[str] = None
+    description: Optional[str] = None
+    temporal_cutoff: Optional[str] = None
+    status: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    # Papers associated with the project's corpus (project_papers).
+    paper_count: int = 0
+    # Papers queued for the next research run (project_paper_selections).
+    selection_count: int = 0
+    gap_count: int = 0
+    opportunity_count: int = 0
+    run_count: int = 0
+
+
+class ProjectCreateDTO(BaseModel):
+    id: Optional[str] = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")
+    title: str = Field(min_length=1, max_length=255)
+    topic: Optional[str] = Field(default=None, max_length=4000)
+    description: Optional[str] = Field(default=None, max_length=8000)
+    temporal_cutoff: Optional[datetime.date] = None
+
+
+class ProjectPaperSelectionItemDTO(BaseModel):
+    id: Optional[str] = None
+    project_id: str
+    openalex_id: str
+    doi: Optional[str] = None
+    title: str
+    authors: List[str] = Field(default_factory=list)
+    publication_year: Optional[int] = None
+    abstract: Optional[str] = None
+    pdf_url: Optional[str] = None
+    selected_at: Optional[str] = None
+
+
+class ProjectPaperSelectionRequestDTO(BaseModel):
+    openalex_id: str
+    doi: Optional[str] = None
+    title: str
+    authors: List[str] = Field(default_factory=list)
+    publication_year: Optional[int] = None
+    abstract: Optional[str] = None
+    pdf_url: Optional[str] = None
+
+
+class BatchSelectionRequestDTO(BaseModel):
+    selections: List[ProjectPaperSelectionRequestDTO]
+
+
+class PreflightPaperItemDTO(BaseModel):
+    openalex_id: str
+    doi: Optional[str] = None
+    title: str
+    authors: List[str] = Field(default_factory=list)
+    publication_year: Optional[int] = None
+    has_pdf: bool = False
+    pdf_url: Optional[str] = None
+    status: str  # 'NEW', 'CORPUS_MATCH', 'NO_PDF', 'METADATA_ONLY'
+    corpus_paper_id: Optional[str] = None
+    warning: Optional[str] = None
+
+
+class PreflightStageItemDTO(BaseModel):
+    stage_id: str
+    name: str
+    description: str
+    estimated_action: Optional[str] = None
+
+
+class PreflightCorpusDTO(BaseModel):
+    total: int = 0
+    with_passages: int = 0
+    statements_extracted: int = 0
+    pending_extraction: int = 0
+    metadata_only: int = 0
+
+
+class PreflightResponseDTO(BaseModel):
+    project_id: str
+    total_selected: int
+    new_papers: int
+    corpus_matches: int
+    pdf_available: int
+    metadata_only: int
+    papers: List[PreflightPaperItemDTO] = Field(default_factory=list)
+    planned_stages: List[PreflightStageItemDTO] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    # Papers already in the project corpus; a run processes them in addition to the selections.
+    corpus: Optional[PreflightCorpusDTO] = None
+    # True when the run has something to process (selections or a non-empty corpus).
+    runnable: bool = False
+
+
+class RunPaperDTO(BaseModel):
+    id: str
+    openalex_id: str
+    doi: Optional[str] = None
+    title: str
+    status: str
+    corpus_paper_id: Optional[str] = None
+    has_pdf: bool = False
+    error_message: Optional[str] = None
+    passages_count: int = 0
+    statements_count: int = 0
+
+
+class RunStageDTO(BaseModel):
+    stage_id: str
+    name: str
+    status: str
+    message: Optional[str] = None
+
+
+class RunDTO(BaseModel):
+    id: str
+    project_id: str
+    status: str  # 'PENDING', 'RUNNING', 'COMPLETED', 'PARTIAL_SUCCESS', 'FAILED', 'AWAITING_REVIEW'
+    current_stage: Optional[str] = None
+    stage_progress: Optional[Dict[str, Any]] = None
+    created_at: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    error_message: Optional[str] = None
+    summary: Optional[Dict[str, Any]] = None
+    papers: List[RunPaperDTO] = Field(default_factory=list)
+    stages: List[RunStageDTO] = Field(default_factory=list)
+
+
+class RunCreateRequestDTO(BaseModel):
+    planned_stages: Optional[List[str]] = None
+
+
+class RunLogsDTO(BaseModel):
+    run_id: str
+    status: str
+    logs: List[Dict[str, Any]] = Field(default_factory=list)

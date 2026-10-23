@@ -1,13 +1,18 @@
-import React, { useCallback, useEffect, useState, useMemo } from 'react';
+import React, { useCallback, useEffect, useRef, useState, useMemo } from 'react';
 import {
   BookOpen,
   FileText,
   Layers,
   Search,
   RefreshCw,
-  Bookmark
+  Bookmark,
+  Loader2,
+  Info,
+  Plus
 } from 'lucide-react';
-import type { PaperItem, StatementItem, TemporalRole } from '../../types';
+import type { PaperItem, ResearchKnowledge, StatementItem, TemporalRole, ResearchProject } from '../../types';
+import { UnderstandResult } from '../workflow/UnderstandResult';
+import { formatElapsed, useElapsedSeconds } from '../../hooks/useElapsedSeconds';
 import { api } from '../../api/client';
 import { LoadingState } from '../common/LoadingState';
 import { EmptyState } from '../common/EmptyState';
@@ -17,9 +22,15 @@ import { getTemporalRoleBadgeVariant, getTemporalRoleLabel, getStatementTypeBadg
 import { NotRecorded, RecordedValue } from '../common/NotRecorded';
 
 interface CorpusInspectorViewProps {
+  project?: ResearchProject | null;
   initialPaperId?: string | null;
   onInspectEvidence: (statementId: string) => void;
+  onNavigate: (route: string) => void;
 }
+
+type UnderstandState =
+  | { phase: 'done'; result: ResearchKnowledge }
+  | { phase: 'error'; message: string };
 
 type RoleFilter = 'ALL' | TemporalRole;
 
@@ -41,8 +52,10 @@ function roleFilterLabel(role: RoleFilter): string {
 }
 
 export const CorpusInspectorView: React.FC<CorpusInspectorViewProps> = ({
+  project,
   initialPaperId,
   onInspectEvidence,
+  onNavigate,
 }) => {
   const [papers, setPapers] = useState<PaperItem[]>([]);
   const [selectedPaperId, setSelectedPaperId] = useState<string | null>(initialPaperId || null);
@@ -59,18 +72,60 @@ export const CorpusInspectorView: React.FC<CorpusInspectorViewProps> = ({
   const [statementTypeFilter, setStatementTypeFilter] = useState<string>('ALL');
   const [statementSearch, setStatementSearch] = useState<string>('');
 
+  // Statement extraction (one paper at a time; results kept per paper).
+  const [understandingPaperId, setUnderstandingPaperId] = useState<string | null>(null);
+  const [understandStartedAt, setUnderstandStartedAt] = useState<number | null>(null);
+  const [understandResults, setUnderstandResults] = useState<Record<string, UnderstandState>>({});
+  const understandInFlight = useRef<boolean>(false);
+  const understandElapsed = useElapsedSeconds(understandStartedAt);
+
   // Papers load once on mount and on explicit refresh; selection changes do not refetch.
-  const fetchPapers = useCallback(() => {
-    setLoadingPapers(true);
+  // A silent reload (after an action) keeps the current view mounted.
+  const fetchPapers = useCallback((silent: boolean = false) => {
+    if (!silent) setLoadingPapers(true);
     setError(null);
-    api.getPapers()
+    api.getPapers(project?.id)
       .then((data) => {
         setPapers(data);
-        setSelectedPaperId((prev) => prev ?? (data.length > 0 ? data[0].id : null));
+        setSelectedPaperId((prev) => {
+          if (prev && data.some((p) => p.id === prev)) {
+            return prev;
+          }
+          return data.length > 0 ? data[0].id : null;
+        });
       })
       .catch((err: Error) => setError(err.message || 'Failed to load corpus papers'))
       .finally(() => setLoadingPapers(false));
-  }, []);
+  }, [project?.id]);
+
+  const understand = (paperId: string) => {
+    if (understandInFlight.current) return;
+    understandInFlight.current = true;
+    setUnderstandingPaperId(paperId);
+    setUnderstandStartedAt(Date.now());
+    setUnderstandResults((prev) => {
+      const next = { ...prev };
+      delete next[paperId];
+      return next;
+    });
+    api.understandPaper(paperId)
+      .then((result) => {
+        setUnderstandResults((prev) => ({ ...prev, [paperId]: { phase: 'done', result } }));
+        fetchPapers(true);
+        setStatementsReloadKey((k) => k + 1);
+      })
+      .catch((err: Error) =>
+        setUnderstandResults((prev) => ({
+          ...prev,
+          [paperId]: { phase: 'error', message: err.message || 'Statement extraction failed.' },
+        })),
+      )
+      .finally(() => {
+        understandInFlight.current = false;
+        setUnderstandingPaperId(null);
+        setUnderstandStartedAt(null);
+      });
+  };
 
   useEffect(() => {
     fetchPapers();
@@ -159,7 +214,7 @@ export const CorpusInspectorView: React.FC<CorpusInspectorViewProps> = ({
         <ErrorBanner
           title="Could Not Load Corpus"
           message={error}
-          onRetry={fetchPapers}
+          onRetry={() => fetchPapers()}
         />
       </div>
     );
@@ -175,13 +230,14 @@ export const CorpusInspectorView: React.FC<CorpusInspectorViewProps> = ({
             <span className="app-badge badge-neutral">{papers.length} Papers</span>
           </div>
           <p className="view-subtitle">
-            Inspect corpus papers, their temporal role relative to the configured cutoff, and extracted statements with linked source passages.
+            Inspect corpus papers, their temporal role relative to the configured cutoff, and extracted statements with linked source passages. Extract statements from newly added papers here.
           </p>
         </div>
         <button
-          onClick={fetchPapers}
+          onClick={() => fetchPapers()}
           className="btn btn-secondary"
           title="Refresh papers"
+          disabled={understandingPaperId !== null}
         >
           <RefreshCw size={14} />
           <span>Refresh</span>
@@ -284,8 +340,26 @@ export const CorpusInspectorView: React.FC<CorpusInspectorViewProps> = ({
                     <span>Publication Date: <RecordedValue value={selectedPaper.publication_date} /></span>
                     <span>Source ID: {selectedPaper.source_id}</span>
                     <span>Passages: {selectedPaper.passage_count}</span>
+                    <span>
+                      Statements:{' '}
+                      {selectedPaper.knowledge_status === 'ANALYZED'
+                        ? 'extracted'
+                        : selectedPaper.knowledge_status === 'EXTRACTION_FAILED'
+                          ? 'last extraction failed (retry below)'
+                          : 'not extracted'}
+                    </span>
                     {selectedPaper.doi && <span>DOI: {selectedPaper.doi}</span>}
                   </div>
+
+                  <PaperUnderstandControl
+                    paper={selectedPaper}
+                    running={understandingPaperId === selectedPaper.id}
+                    blocked={understandingPaperId !== null && understandingPaperId !== selectedPaper.id}
+                    elapsedLabel={formatElapsed(understandElapsed)}
+                    state={understandResults[selectedPaper.id]}
+                    onUnderstand={() => understand(selectedPaper.id)}
+                    onNavigate={onNavigate}
+                  />
 
                   {selectedPaper.abstract && (
                     <div className="section-divider">
@@ -424,6 +498,89 @@ export const CorpusInspectorView: React.FC<CorpusInspectorViewProps> = ({
           )}
         </div>
       </div>
+    </div>
+  );
+};
+
+interface PaperUnderstandControlProps {
+  paper: PaperItem;
+  running: boolean;
+  blocked: boolean;
+  elapsedLabel: string;
+  state: UnderstandState | undefined;
+  onUnderstand: () => void;
+  onNavigate: (route: string) => void;
+}
+
+/**
+ * Statement extraction is offered only for unanalyzed papers with stored passages:
+ * re-running it replaces a paper's existing statements, which gaps may reference.
+ */
+const PaperUnderstandControl: React.FC<PaperUnderstandControlProps> = ({
+  paper,
+  running,
+  blocked,
+  elapsedLabel,
+  state,
+  onUnderstand,
+  onNavigate,
+}) => {
+  const result =
+    state?.phase === 'done' ? (
+      <UnderstandResult
+        knowledge={state.result}
+        action={
+          <button type="button" className="btn btn-secondary btn-sm" onClick={() => onNavigate('#/gaps')}>
+            <span>Go to research gaps</span>
+          </button>
+        }
+      />
+    ) : state?.phase === 'error' ? (
+      <div className="action-result is-error" role="alert">
+        <p className="action-result-title">Statement extraction failed</p>
+        <p className="u-text-sm">{state.message}</p>
+      </div>
+    ) : null;
+
+  if (state?.phase === 'done') return result;
+
+  if (paper.knowledge_status === 'ANALYZED') {
+    return null;
+  }
+
+  if (paper.passage_count === 0) {
+    return (
+      <div className="inline-note">
+        <Info size={16} />
+        <span>
+          No full-text passages are stored for this paper (metadata only), so research statements cannot be extracted.
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="u-stack">
+      <div className="u-row u-wrap">
+        <button type="button" className="btn btn-primary btn-sm" onClick={onUnderstand} disabled={running || blocked}>
+          {running ? <Loader2 size={14} className="spin" /> : <Plus size={14} />}
+          <span>
+            {running
+              ? 'Extracting statements…'
+              : blocked
+                ? 'Another extraction is running'
+                : state?.phase === 'error'
+                  ? 'Retry statement extraction'
+                  : 'Extract research statements'}
+          </span>
+        </button>
+        {running && (
+          <span className="u-text-xs u-text-secondary" role="status">
+            Running on the server ({elapsedLabel} elapsed); LLM extraction can take several minutes.
+          </span>
+        )}
+      </div>
+      {result}
     </div>
   );
 };

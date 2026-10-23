@@ -55,6 +55,12 @@ class TestSettingsDefaults:
         assert settings.ollama_embedding_dimension == 768
         assert settings.ollama_timeout == 300.0
         assert settings.ollama_num_ctx == 8192
+        assert settings.ollama_num_predict == 512
+        assert settings.ollama_auto_manage is True
+        assert settings.ollama_idle_timeout == 60.0
+        assert settings.ollama_startup_timeout == 30.0
+        assert settings.ollama_polling_interval == 0.5
+        assert settings.ollama_binary_path == "ollama"
 
 
 class TestSettingsFromEnv:
@@ -89,6 +95,11 @@ class TestSettingsFromEnv:
         monkeypatch.setenv("IDEAGEN_OLLAMA_EMBEDDING_DIMENSION", "1024")
         monkeypatch.setenv("IDEAGEN_OLLAMA_TIMEOUT", "60.0")
         monkeypatch.setenv("IDEAGEN_OLLAMA_NUM_CTX", "16384")
+        monkeypatch.setenv("IDEAGEN_OLLAMA_AUTO_MANAGE", "false")
+        monkeypatch.setenv("IDEAGEN_OLLAMA_IDLE_TIMEOUT", "120.0")
+        monkeypatch.setenv("IDEAGEN_OLLAMA_STARTUP_TIMEOUT", "45.0")
+        monkeypatch.setenv("IDEAGEN_OLLAMA_POLLING_INTERVAL", "0.2")
+        monkeypatch.setenv("IDEAGEN_OLLAMA_BINARY_PATH", "/usr/local/bin/ollama")
 
         settings = Settings()
         assert settings.llm_provider == "gemini"
@@ -99,6 +110,11 @@ class TestSettingsFromEnv:
         assert settings.ollama_embedding_dimension == 1024
         assert settings.ollama_timeout == 60.0
         assert settings.ollama_num_ctx == 16384
+        assert settings.ollama_auto_manage is False
+        assert settings.ollama_idle_timeout == 120.0
+        assert settings.ollama_startup_timeout == 45.0
+        assert settings.ollama_polling_interval == 0.2
+        assert settings.ollama_binary_path == "/usr/local/bin/ollama"
 
 
 class TestGetSettings:
@@ -125,3 +141,35 @@ class TestPackageImport:
         assert hasattr(ideagen, "__version__")
         assert isinstance(ideagen.__version__, str)
         assert ideagen.__version__ == "0.1.0"
+
+
+class TestCandidateRankingStrategySetting:
+    """The ranking strategy is validated when settings load, not on each ingestion."""
+
+    def test_defaults_to_tfidf(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("IDEAGEN_CANDIDATE_RANKING_STRATEGY", raising=False)
+        monkeypatch.delenv("CANDIDATE_RANKING_STRATEGY", raising=False)
+        assert Settings().candidate_ranking_strategy == "tfidf"
+
+    @pytest.mark.parametrize("raw,expected", [("fifo", "fifo"), (" TFIDF ", "tfidf"), ("FIFO", "fifo")])
+    def test_accepts_and_normalizes_supported_values(
+        self, monkeypatch: pytest.MonkeyPatch, raw: str, expected: str
+    ) -> None:
+        monkeypatch.setenv("IDEAGEN_CANDIDATE_RANKING_STRATEGY", raw)
+        assert Settings().candidate_ranking_strategy == expected
+
+    @pytest.mark.parametrize("raw", ["bm25", "", "tf-idf"])
+    def test_rejects_unsupported_values_at_load(self, monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+        from pydantic import ValidationError
+
+        monkeypatch.setenv("IDEAGEN_CANDIDATE_RANKING_STRATEGY", raw)
+        with pytest.raises(ValidationError, match="Unsupported candidate ranking strategy"):
+            Settings()
+
+    def test_supported_values_match_ranker_factory(self) -> None:
+        from ideagen.core.config import SUPPORTED_CANDIDATE_RANKING_STRATEGIES
+        from ideagen.opportunity.ranking import FIFOCandidateRanker, TFIDFCandidateRanker, get_candidate_ranker
+
+        assert isinstance(get_candidate_ranker("tfidf"), TFIDFCandidateRanker)
+        assert isinstance(get_candidate_ranker("fifo"), FIFOCandidateRanker)
+        assert SUPPORTED_CANDIDATE_RANKING_STRATEGIES == {"tfidf", "fifo"}

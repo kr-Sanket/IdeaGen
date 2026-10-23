@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Collection, Dict, List, Optional
 import uuid
 
 from ideagen.core.config import get_settings
 from ideagen.llm import LLMProvider, get_default_llm_provider
+from ideagen.llm.exceptions import ProviderFailureError
 from .models import (
     GapStatus,
     ResearchGapResponseDTO,
@@ -39,6 +40,7 @@ class SemanticGapDiscoveryPipeline:
         index_dir: Optional[Path] = None,
         similarity_threshold: float = 0.65,
         min_supporting_evidence: int = 1,
+        max_evidence_per_candidate: int = 3,
     ):
         self.persistence = persistence
         settings = get_settings()
@@ -58,14 +60,27 @@ class SemanticGapDiscoveryPipeline:
 
         # 4. LLM Validator
         val_provider = llm_provider if llm_provider is not None else get_default_llm_provider()
-        self.validator = GapValidator(provider=val_provider, min_valid_evidence=min_supporting_evidence)
+        self.validator = GapValidator(
+            provider=val_provider,
+            min_valid_evidence=min_supporting_evidence,
+            max_evidence_per_candidate=max_evidence_per_candidate,
+        )
 
     def discover_gaps(
         self,
         persist_index: bool = True,
         cutoff_date: Optional[Union[datetime.date, datetime.datetime, str]] = None,
+        paper_ids: Optional[Collection[uuid.UUID]] = None,
+        project_id: Optional[str] = None,
+        gap_metadata: Optional[Dict[str, object]] = None,
     ) -> List[ResearchGapResponseDTO]:
-        """Executes the full semantic gap discovery pipeline across eligible research statements."""
+        """Executes the full semantic gap discovery pipeline across eligible research statements.
+
+        ``paper_ids`` restricts discovery to statements and passages from those papers (a
+        project's corpus). ``None`` means the whole database; an empty collection discovers nothing.
+        ``project_id`` and ``gap_metadata`` are stored with each gap as it is saved, so gaps persisted
+        before a later failure still belong to their project and run.
+        """
         from .temporal import normalize_cutoff_date, filter_statements_by_cutoff
 
         norm_cutoff = normalize_cutoff_date(cutoff_date)
@@ -81,6 +96,13 @@ class SemanticGapDiscoveryPipeline:
         # In-memory defense-in-depth filtering
         if norm_cutoff is not None:
             statements = filter_statements_by_cutoff(statements, norm_cutoff)
+
+        scoped = paper_ids is not None
+        if scoped:
+            allowed_paper_ids = set(paper_ids)
+            statements = [s for s in statements if s.paper_id in allowed_paper_ids]
+            # A scoped discovery must not persist over the shared, whole-corpus FAISS index.
+            persist_index = False
 
         if not statements:
             logger.info("No eligible research statements found in database for discovery. Skipped.")
@@ -105,7 +127,7 @@ class SemanticGapDiscoveryPipeline:
                 p_paper_id = getattr(p, "paper_id", None) if hasattr(p, "paper_id") else (
                     p.get("paper_id") if isinstance(p, dict) else None
                 )
-                if norm_cutoff is None or p_paper_id in eligible_paper_ids:
+                if (norm_cutoff is None and not scoped) or p_paper_id in eligible_paper_ids:
                     p_id = getattr(p, "id", None) if hasattr(p, "id") else (
                         p.get("id") if isinstance(p, dict) else None
                     )
@@ -136,18 +158,30 @@ class SemanticGapDiscoveryPipeline:
         # 6. Validate candidates and enforce evidence integrity
         persisted_dtos: List[ResearchGapResponseDTO] = []
         for candidate in candidates:
-            gap_dto = self.validator.validate_candidate(
-                candidate=candidate,
-                statements_by_id=statements_by_id,
-                passages_by_id=passages_by_id,
-            )
+            try:
+                gap_dto = self.validator.validate_candidate(
+                    candidate=candidate,
+                    statements_by_id=statements_by_id,
+                    passages_by_id=passages_by_id,
+                )
+            except ProviderFailureError as e:
+                logger.error(
+                    f"Gap discovery validation aborted due to provider failure: {e}. "
+                    f"Stopping candidate processing."
+                )
+                raise
 
             # Record temporal cutoff in gap metadata if present
             if norm_cutoff is not None:
                 gap_dto.metadata["temporal_cutoff"] = norm_cutoff.isoformat()
+            if gap_metadata:
+                gap_dto.metadata.update(gap_metadata)
 
             # 7. Persist to PostgreSQL
-            gap_id = self.persistence.save_research_gap(gap_dto)
+            if project_id is not None:
+                gap_id = self.persistence.save_research_gap(gap_dto, project_id=project_id)
+            else:
+                gap_id = self.persistence.save_research_gap(gap_dto)
 
             # 8. Add to output
             persisted_dtos.append(

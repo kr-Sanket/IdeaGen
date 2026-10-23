@@ -9,7 +9,7 @@ interface LoadingStateProps {
 
 export const LoadingState: React.FC<LoadingStateProps> = ({
   message = 'Loading experiment data...',
-  submessage = 'Querying read-only pipeline database',
+  submessage = 'Querying the IdeaGen API',
   minHeight = '300px',
 }) => {
   return (

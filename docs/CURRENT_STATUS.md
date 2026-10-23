@@ -1,6 +1,16 @@
 # Current Status
 
-> **Last updated:** 2026-10-21
+> **2026-10-23 — reliability audit:** see [`RELIABILITY_AUDIT_2026-10-23.md`](RELIABILITY_AUDIT_2026-10-23.md).
+> Projects are now server-side records (AD-24); research runs execute INGESTION → UNDERSTANDING →
+> GAP_DISCOVERY and pause at AWAITING_REVIEW, never generating opportunities (AD-25); gap discovery and
+> prior-art retrieval are project-scoped (AD-26); proxy failures are diagnosed, not bypassed (AD-27).
+> Verified: 818 passed / 25 skipped (backend, temporary databases), frontend tsc/oxlint/build clean,
+> headless-browser E2E 29/29, and real-provider runs (OpenAlex, qwen3:8b, nomic-embed-text) for search →
+> add → run → review → explicit opportunity, failure and interruption/retry. Not verified: PostgreSQL.
+> Not implemented: human gap accept/reject, server-side project rename/delete.
+> The sections below predate the audit and were not re-verified unless restated in the audit report.
+
+> **Last updated:** 2026-10-23
 > Facts below were checked against the source code, test runs and experiment artifacts on this date.
 > Verification limits are stated explicitly; anything not listed as executed was not executed.
 
@@ -8,10 +18,12 @@
 
 ## Current Phase
 
-**Backend pipeline hardening complete; checkpoint commit pending.** The evidence-grounded pipeline
-(ingestion → relevance screening → extraction → gap discovery → opportunity generation → temporal
-evolution) is implemented and exercised end to end by the controlled experiment runner. A read-only
-frontend explorer has been rebuilt. Next step: frontend demonstration work on top of the existing API.
+**Phase 5E bounded live discovery complete and audited; backend pipeline verified with local Ollama.**
+The evidence-grounded pipeline (ingestion → relevance screening → extraction → gap discovery →
+opportunity generation → temporal evolution) is implemented and verified end to end with real local models
+(`nomic-embed-text` and `qwen3:8b`). Managed Ollama subprocess reliability has been hardened to eliminate
+pipe buffer deadlocks (AD-28). Next step: frontend demonstration workflow and final integration on top
+of the existing verified API.
 
 ---
 
@@ -21,7 +33,7 @@ frontend explorer has been rebuilt. Next step: frontend demonstration work on to
 |------|--------|----------|
 | Backend stack | FastAPI app, SQLAlchemy models, Pydantic schemas | `backend/ideagen/api/main.py`, `api/schema.py`, `db/models.py` |
 | Database | PostgreSQL is the intended application store (Alembic chain, 11 revisions, head `e7b3c9a14f52`). Experiments and tests use SQLite via `create_all` | `backend/alembic/versions/`, `experiments/runner.py` |
-| LLM / embeddings | Ollama `qwen3:8b` (structured output, `think: false`) and `nomic-embed-text` (768-d) behind provider abstractions; Gemini provider retained | `ideagen/llm/`, `ideagen/discovery/embeddings.py` |
+| LLM / embeddings & lifecycle | Ollama `qwen3:8b` and `nomic-embed-text` with automated lifecycle manager (`OllamaLifecycleManager`): auto-start, external-server reuse without claimed ownership, bounded readiness polling, lease-based reference counting, safe idle shutdown, process ownership verification, conservative app shutdown, and deadlock-free log file / DEVNULL stderr redirection with safe handle cleanup (AD-28) | `ideagen/llm/ollama_lifecycle.py`, `ideagen/llm/ollama_provider.py`, `ideagen/discovery/embeddings.py` |
 | PDF ingestion | PyMuPDF extraction, section detection, deterministic passage chunking, SHA-256 content-hash deduplication; no fabricated publication dates | `ideagen/ingestion/pdf.py`, `ideagen/ingestion/passage_chunker.py` |
 | OpenAlex search and ingestion | Search API with strict ID/DOI query routing; ingest endpoint with SSRF-hardened open-access PDF downloader (global-unicast-only destinations, DNS pinning, redirect validation, size and signature checks) and metadata-only fallback | `ingestion/search.py`, `ingestion/openalex_ingestion.py`, `ingestion/downloader.py` |
 | Relevance screening | Deterministic embedding ranking of pre-cutoff papers (no LLM); decisions recorded and reused only when the input signature (including the scored abstract) matches | `ideagen/discovery/screening.py` |
@@ -40,13 +52,13 @@ frontend explorer has been rebuilt. Next step: frontend demonstration work on to
 
 ## Verified Results
 
-### Automated tests (2026-10-21, local macOS, Python 3.14.8 virtualenv)
+### Automated tests (2026-10-23, local macOS, Python 3.14.8 virtualenv)
 
 Two verified test-run configurations were audited against the backend test suite:
 
-1. **Standard Unfiltered Run** (`.venv/bin/pytest` or `pytest -q backend/tests`):
-   - **689 passed, 26 skipped, 0 failed, 0 deselected** (22.20 s).
-   - **Skip breakdown**: 25 skips are PostgreSQL-dependent (requiring `IDEAGEN_DATABASE_URL`, covering database session foundation, persistence layer, PDF storage, gap persistence, understanding persistence/API, and end-to-end integration); 1 skip (`tests/test_ollama_provider.py::test_live_ollama_smoke`) requires a reachable local Ollama HTTP service (`http://localhost:11434`).
+1. **Standard Unfiltered Run** (`.venv/bin/pytest backend/tests`):
+   - **841 passed, 26 skipped, 0 failed, 0 deselected** (23.59 s).
+   - **Skip breakdown**: 25 skips are PostgreSQL-dependent (requiring `IDEAGEN_DATABASE_URL`); 1 skip (`tests/test_ollama_provider.py::test_live_ollama_smoke`) requires a reachable local Ollama HTTP service (`http://localhost:11434`).
    - *Database note*: PostgreSQL integration has not been verified in this environment because PostgreSQL-dependent tests were skipped; passing offline SQLite tests does not establish PostgreSQL correctness. These counts are environment-specific and should be updated after future test runs.
 
 2. **Deselected Live-Model Run** (used during isolated offline audit):
@@ -78,6 +90,20 @@ It demonstrates pipeline integrity on a tiny corpus; it does not establish scien
 Caveats: labels are single-annotator; prompt v2 was revised after inspecting v1 errors on these same
 25 cases, so its figures are not a held-out estimate; the sample is too small for statistical claims.
 
+### Phase 5E bounded live discovery experiment (2026-10-23)
+
+Artifacts: `phase5e_results.json`, `run_phase5e_server.py`, `run_phase5e_client.py` in session scratch; server log `task-205.log`; client log `task-209.log`; isolated DB `ideagen_demo_isolated_phase5e.db`.
+
+- **Endpoint & Timing**: `POST /api/v1/gaps/discover?project_id=rag-benchmark` completed with HTTP 200 OK in **21.85 seconds** (against a 240.0s client timeout budget and 120.0s internal Ollama timeout budget; AD-29).
+- **Embeddings & Clustering**: 127 research statements embedded using local `nomic-embed-text` via `OllamaEmbeddingProvider`. 24 semantic clusters formed, producing 14 candidate gaps.
+- **Bounded Validation**: The test harness intentionally bounded candidate validation to exactly one candidate (`candidates[:1]`; AD-30) to test end-to-end connectivity, timeout propagation, and persistence without unbounded queue latency.
+- **Model Evaluation**: `qwen3:8b` completed structured candidate validation in **19.968 seconds**, returning a `VALID` verdict (`status: VALIDATED`, `confidence: None`, reasoning citing two specific passages).
+- **Persistence & Evidence Provenance**: Persisted exactly one validated gap (`4cc867d5e6ce449d8992a9b63539161b`) and two supporting evidence links (`eaf8a50c...`, `09ec9a2e...`) referencing verified database statements (`0c30c759...`, `7354dd77...`). Invariant audit verified zero dangling foreign keys and strict provenance adherence.
+- **Database & Baseline Isolation**: Executed against an isolated SQLite clone (`ideagen_demo_isolated_phase5e.db`, SHA-256 `ed06beccf638dcf1a5890f684ab638f6fe0a6b45a25962882fa981173ce6b480`; AD-31). Upstream databases remained bit-for-bit identical to baseline checksums: Master DB (`a70ff8a5...`), Phase 4C (`87acabb0...`), Phase 5B (`7528deb0...`), and Phase 5D (`87acabb0...`).
+- **Subprocess Reliability Fix**: Managed Ollama lifecycle daemon (`ideagen/llm/ollama_lifecycle.py`) was updated to route subprocess stderr to a managed log file (with `subprocess.DEVNULL` fallback) and guaranteed file-handle closure upon process exit or failure, eliminating Darwin kernel 16 KB pipe buffer deadlocks (AD-28).
+- **Focused Test Suite**: 101 passed, 2 skipped (live model smoke tests skipped in offline run) across `backend/tests/test_ollama_lifecycle.py` and `backend/tests/test_ollama_provider.py`.
+- **Scope & Generalization Limits**: This run was explicitly bounded (1 candidate evaluated out of 14) and isolated in SQLite; it verifies end-to-end pipeline wiring, timeout resilience, and persistence mechanics under local Ollama. It does not establish multi-candidate throughput under full load, nor does it make general claims of universal scientific novelty for discovered gaps.
+
 ---
 
 ## Not Verified / Not Executed
@@ -87,7 +113,7 @@ Caveats: labels are single-annotator; prompt v2 was revised after inspecting v1 
 - **Python 3.11–3.13**: no such interpreter was available. A static compatibility check
   (annotation names, 3.12-only f-string syntax, PEP 695 syntax) reported no issues; this is not a
   substitute for running the suite on 3.11.
-- **Live services in tests**: Ollama, Gemini, OpenAlex and PDF downloads are mocked in the test suite.
+- **Live services in standard test suite**: Ollama, Gemini, OpenAlex and PDF downloads are mocked in the standard unit test suite (live model tests such as `test_live_ollama_smoke` are skipped unless explicitly invoked against a live server; empirical validation is conducted in isolated bounded harnesses such as Phase 5D and Phase 5E).
 - **Frontend runtime**: type-checked and linted only; no browser or end-to-end UI test.
 
 ---
@@ -191,3 +217,5 @@ and were not re-verified on 2026-10-21; see "Verified Results" above for the cur
 | Phase 13C.1 — ACQUISITION CORRECTNESS REPAIR | Removed unsafe `updated_date` pruning. Added `is_xpac=false` to explicitly match OpenAlex API core behavior, formalizing Corpus Specification v1.2.1. Validated database integrity (0 records inserted). Designed new per-partition checkpoint architecture (`ingestion_checkpoint_v13C.1.json`). Benchmarked transfer methods (HTTPS vs S3 anonymous). Fully tested specification changes. |
 | Phase 13D — CLOUD SNAPSHOT ACQ. FEASIBILITY + COST GATE | Designed an ephemeral AWS EC2 (c7g.4xlarge) architecture to process the 659 GB snapshot using 16 parallel multiprocessing workers in the `us-east-1` region. Estimated runtime drops from ~67 hours locally to <2 hours. Total estimated cost is <$2.00. The job produces a compact `JSONL.gz` artifact (~5MB) for SCP transfer back to the local database, completely bypassing long local HTTP bottlenecks. |
 | Phase 14 — REAL-DATA DEMO ONLY | Generated a prototype corpus of 20 real ArXiv papers on RAG hallucinations. Modified the `demo_service.py` to ingest these real papers into an in-memory test DB, mapping them across temporal batches. Fully demonstrated the Research Pipeline (Discovery -> Grounding -> Evolution) on real text with deterministic state transitions. Verified backend test suites and frontend build. Produced `DEMO_GUIDE.md` for local presentations. |
+| Phase 5D — Bounded Live-Model Validation | Validated direct `qwen3:8b` and `nomic-embed-text` provider inference against controlled benchmarks. Structured output and citation constraints verified. |
+| Phase 5E — Bounded Live Discovery API Test | Successfully verified bounded live discovery API (`POST /api/v1/gaps/discover?project_id=rag-benchmark`) with local Ollama (`qwen3:8b` + `nomic-embed-text`) against an isolated SQLite database clone. Resolved Ollama daemon subprocess stderr pipe buffer deadlock via dedicated log file redirection with safe handle cleanup (AD-28). 127 statements embedded, 24 clusters formed, exactly 1 candidate validated (HTTP 200 in 21.85s). Evidence provenance and database integrity audits passed; baseline checksums unchanged. Focused unit tests: 101 passed, 2 skipped. |

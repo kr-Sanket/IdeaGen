@@ -548,7 +548,7 @@ def test_discover_gaps_endpoint_accepts_cutoff_date(test_db):
     with patch("ideagen.api.main.SemanticGapDiscoveryPipeline.discover_gaps", return_value=[]) as mock_discover:
         res = client.post("/api/gaps/discover?cutoff_date=2024-06-01")
         assert res.status_code == 200
-        mock_discover.assert_called_once_with(cutoff_date="2024-06-01")
+        mock_discover.assert_called_once_with(cutoff_date="2024-06-01", paper_ids=None)
 
 
 def test_generate_opportunity_endpoint_respects_cutoff_date(test_db, mock_pipeline_dependencies):
@@ -643,3 +643,45 @@ def test_generate_opportunity_endpoint_respects_cutoff_date(test_db, mock_pipeli
         assert ids["stmt_id"] in v_idx.id_list
         assert future_stmt_id not in v_idx.id_list
 
+
+
+def test_generate_opportunity_bridge_db_failure_saves_nothing_and_hides_sql(test_db):
+    """A database failure while bridging the generated record must not commit an unbridged
+    record, must return an actionable 500 without SQL details, and must not break later requests."""
+    from sqlalchemy.exc import IntegrityError
+    from ideagen.db.models import Opportunity
+    from ideagen.opportunity.bridge import OpportunityBridgeService
+
+    client, ids = test_db
+    SessionMaker = ids["session_maker"]
+    with SessionMaker() as db:
+        records_before = db.query(ResearchOpportunityRecord).count()
+        lifecycle_before = db.query(Opportunity).count()
+
+    db_error = IntegrityError(
+        "INSERT INTO opportunities (id, research_opportunity_id) VALUES (?, ?)",
+        ("secret-param",),
+        Exception("UNIQUE constraint failed: opportunities.id"),
+    )
+    with patch.object(OpportunityBridgeService, "bridge_opportunity", side_effect=db_error):
+        res = client.post(f"/api/v1/gaps/{ids['gap_id']}/opportunity")
+
+    assert res.status_code == 500
+    detail = res.json()["detail"]
+    assert detail.startswith("Opportunity generation failed")
+    assert "nothing was saved" in detail
+    for leaked in ("INSERT", "opportunities.id", "secret-param", "UNIQUE"):
+        assert leaked not in detail
+
+    with SessionMaker() as db:
+        assert db.query(ResearchOpportunityRecord).count() == records_before
+        assert db.query(Opportunity).count() == lifecycle_before
+
+    # The same client/database recovers: a retry succeeds and is bridged.
+    res_ok = client.post(f"/api/v1/gaps/{ids['gap_id']}/opportunity")
+    assert res_ok.status_code == 200
+    new_id = uuid.UUID(res_ok.json()["opportunity_id"])
+    with SessionMaker() as db:
+        assert db.query(ResearchOpportunityRecord).count() == records_before + 1
+        lifecycle = db.query(Opportunity).filter(Opportunity.research_opportunity_id == new_id).one()
+        assert lifecycle.status == "OPEN"

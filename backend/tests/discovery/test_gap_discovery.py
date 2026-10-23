@@ -996,3 +996,182 @@ def test_pattern_analyzer_multi_paper_limitation_and_future_work():
     assert "subsequent work explicitly designates this problem" in gap.why_existing_work_insufficient
     assert set(gap.supporting_paper_ids) == {p1, p2}
     assert len(gap.supporting_paper_ids) == 2
+
+
+def test_validator_bounds_evidence_statements_in_prompt():
+    """Validator bounds candidate evidence to max_evidence_per_candidate in prompt."""
+    p_id = uuid.uuid4()
+    stmts = []
+    statements_by_id = {}
+    stmt_ids = []
+    for i in range(6):
+        sid = uuid.uuid4()
+        stmt_ids.append(sid)
+        s = {
+            "id": sid,
+            "paper_id": p_id,
+            "statement_type": "LIMITATION",
+            "statement_text": f"Limitation statement number {i}.",
+            "section": "Discussion",
+        }
+        stmts.append(s)
+        statements_by_id[sid] = s
+
+    candidate = GapCandidate(
+        gap_statement="Unresolved scalability bottleneck.",
+        research_problem="Scalability in dense indexing.",
+        why_existing_work_insufficient="Current indexing exhibits excessive memory.",
+        supporting_statement_ids=stmt_ids,
+        supporting_paper_ids=[p_id],
+        relevant_limitations=[s["statement_text"] for s in stmts],
+        relevant_future_work=[],
+    )
+
+    provider = StubValidationProvider(
+        verdict=ValidationVerdict.VALID,
+        reasoning="Validated on top 3 statements.",
+        cited_ids=[str(stmt_ids[0])],
+    )
+
+    validator = GapValidator(provider=provider, min_valid_evidence=1, max_evidence_per_candidate=3)
+    res = validator.validate_candidate(candidate, statements_by_id)
+
+    assert res.status == GapStatus.VALIDATED
+    assert provider.last_prompt is not None
+    # Only first 3 statements should appear in the prompt
+    for sid in stmt_ids[:3]:
+        assert str(sid) in provider.last_prompt
+    for sid in stmt_ids[3:]:
+        assert str(sid) not in provider.last_prompt
+
+    # Check evidence-count metadata
+    assert res.metadata.get("total_candidate_evidence_count") == 6
+    assert res.metadata.get("evaluated_evidence_count") == 3
+
+
+def test_validator_deduplicates_repeated_passages():
+    """Validator deduplicates repeated source passages across evidence statements."""
+    p_id = uuid.uuid4()
+    pass_id = uuid.uuid4()
+    s1_id = uuid.uuid4()
+    s2_id = uuid.uuid4()
+
+    passage_text = "Empirical tests demonstrate that 4-bit quantization reduces memory by 60% with 1% loss."
+    statements_by_id = {
+        s1_id: {
+            "id": s1_id,
+            "paper_id": p_id,
+            "passage_id": pass_id,
+            "statement_type": "LIMITATION",
+            "statement_text": "Quantization introduces precision degradation.",
+            "section": "Methods",
+        },
+        s2_id: {
+            "id": s2_id,
+            "paper_id": p_id,
+            "passage_id": pass_id,
+            "statement_type": "LIMITATION",
+            "statement_text": "Calibration error increases under aggressive clipping.",
+            "section": "Methods",
+        },
+    }
+    passages_by_id = {
+        pass_id: {
+            "id": pass_id,
+            "paper_id": p_id,
+            "text": passage_text,
+        }
+    }
+
+    candidate = GapCandidate(
+        gap_statement="Quantization noise in low-bit models.",
+        research_problem="Quantization fidelity.",
+        why_existing_work_insufficient="Clipping introduces non-linear distortion.",
+        supporting_statement_ids=[s1_id, s2_id],
+        supporting_paper_ids=[p_id],
+    )
+
+    provider = StubValidationProvider(
+        verdict=ValidationVerdict.VALID,
+        reasoning="Quantization loss confirmed.",
+        cited_ids=[str(s1_id), str(s2_id)],
+    )
+
+    validator = GapValidator(provider=provider, min_valid_evidence=1, max_evidence_per_candidate=3)
+    res = validator.validate_candidate(candidate, statements_by_id, passages_by_id=passages_by_id)
+
+    assert res.status == GapStatus.VALIDATED
+    prompt = provider.last_prompt
+    assert prompt.count(passage_text) == 1
+    assert f"[Same source passage as statement {s1_id} above]" in prompt
+
+
+def test_validator_propagates_provider_failure_error():
+    """Validator propagates ProviderFailureError rather than creating a fake rejected gap."""
+    from ideagen.llm.exceptions import ProviderFailureError
+
+    class FailingProvider(LLMProvider):
+        def generate_structured(self, prompt: str, response_schema):
+            raise ProviderFailureError("Ollama request timed out after 300.0s")
+
+    s_id = uuid.uuid4()
+    p_id = uuid.uuid4()
+    statements_by_id = {
+        s_id: {
+            "id": s_id,
+            "paper_id": p_id,
+            "statement_type": "LIMITATION",
+            "statement_text": "Timeout test statement.",
+        }
+    }
+    candidate = GapCandidate(
+        gap_statement="Timeout test gap.",
+        research_problem="Problem.",
+        why_existing_work_insufficient="Insufficient.",
+        supporting_statement_ids=[s_id],
+        supporting_paper_ids=[p_id],
+    )
+
+    validator = GapValidator(provider=FailingProvider(), min_valid_evidence=1)
+    with pytest.raises(ProviderFailureError) as exc_info:
+        validator.validate_candidate(candidate, statements_by_id)
+
+    assert "Ollama request timed out after 300.0s" in str(exc_info.value)
+
+
+def test_pipeline_aborts_on_provider_failure_error(tmp_path):
+    """Pipeline aborts candidate processing loop on ProviderFailureError and re-raises."""
+    from unittest.mock import MagicMock
+    from ideagen.llm.exceptions import ProviderFailureError
+    from ideagen.discovery.pipeline import SemanticGapDiscoveryPipeline
+    from ideagen.db.persistence import SQLAlchemyPersistenceLayer
+
+    call_count = 0
+
+    class FailingOnSecondProvider(LLMProvider):
+        def generate_structured(self, prompt: str, response_schema):
+            nonlocal call_count
+            call_count += 1
+            raise ProviderFailureError("Ollama connection timed out")
+
+    mock_persistence = MagicMock(spec=SQLAlchemyPersistenceLayer)
+    # Mock statements returning 2 distinct valid clusters (min_cluster_size=2 each)
+    s1 = MagicMock(id=uuid.uuid4(), paper_id=uuid.uuid4(), statement_text="Retrieval latency suffers severe degradation under noise.", statement_type="LIMITATION", passage_id=None, section=None)
+    s2 = MagicMock(id=uuid.uuid4(), paper_id=uuid.uuid4(), statement_text="High latency overhead limits real-time traversal.", statement_type="LIMITATION", passage_id=None, section=None)
+    s3 = MagicMock(id=uuid.uuid4(), paper_id=uuid.uuid4(), statement_text="Vision grounding fails on out-of-distribution distractors.", statement_type="LIMITATION", passage_id=None, section=None)
+    s4 = MagicMock(id=uuid.uuid4(), paper_id=uuid.uuid4(), statement_text="Multimodal vision alignment lacks empirical robustness.", statement_type="LIMITATION", passage_id=None, section=None)
+    mock_persistence.get_all_research_statements.return_value = [s1, s2, s3, s4]
+    mock_persistence.get_all_passages.return_value = []
+
+    pipeline = SemanticGapDiscoveryPipeline(
+        persistence=mock_persistence,
+        embedding_provider=DeterministicTestEmbeddingProvider(dimension=128),
+        llm_provider=FailingOnSecondProvider(),
+        index_dir=tmp_path,
+    )
+
+    with pytest.raises(ProviderFailureError):
+        pipeline.discover_gaps(persist_index=False)
+
+    # First candidate failed with timeout, loop must have aborted immediately without calling second
+    assert call_count == 1

@@ -24,18 +24,22 @@ import { api } from '../../api/client';
 import { LoadingState } from '../common/LoadingState';
 import { ErrorBanner } from '../common/ErrorBanner';
 import { Badge } from '../common/Badge';
-import { getLifecycleBadgeVariant, getRelationshipBadgeVariant } from '../common/badgeVariants';
+import { getGenerationStatusBadgeVariant, getLifecycleBadgeVariant, getRelationshipBadgeVariant } from '../common/badgeVariants';
 import { NotRecorded, RecordedValue } from '../common/NotRecorded';
 import { displayPercent } from '../../format';
+import { EvolvePanel } from '../workflow/EvolvePanel';
 
 interface OpportunityDetailViewProps {
   opportunityId: string;
+  /** Active project; the backend returns 404 for an opportunity outside it. */
+  projectId?: string;
   onNavigate: (route: string) => void;
   onInspectEvidence: (statementId: string) => void;
 }
 
 export const OpportunityDetailView: React.FC<OpportunityDetailViewProps> = ({
   opportunityId,
+  projectId,
   onNavigate,
   onInspectEvidence,
 }) => {
@@ -43,15 +47,23 @@ export const OpportunityDetailView: React.FC<OpportunityDetailViewProps> = ({
   const [evidenceList, setEvidenceList] = useState<OpportunityEvidenceItem[]>([]);
   const [historyList, setHistoryList] = useState<OpportunityHistoryItem[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+  const [refreshing, setRefreshing] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
 
-  const fetchData = React.useCallback(() => {
-    setLoading(true);
-    setError(null);
+  // Full load shows the loading state; a silent refresh (after an action) keeps the page mounted.
+  const fetchData = React.useCallback((silent: boolean = false) => {
+    if (silent) {
+      setRefreshing(true);
+      setRefreshError(null);
+    } else {
+      setLoading(true);
+      setError(null);
+    }
     Promise.all([
-      api.getOpportunityReport(opportunityId),
-      api.getOpportunityEvidence(opportunityId),
-      api.getOpportunityHistory(opportunityId),
+      api.getOpportunityReport(opportunityId, projectId),
+      api.getOpportunityEvidence(opportunityId, projectId),
+      api.getOpportunityHistory(opportunityId, projectId),
     ])
       .then(([rep, evs, hists]) => {
         setReport(rep);
@@ -64,9 +76,31 @@ export const OpportunityDetailView: React.FC<OpportunityDetailViewProps> = ({
         setEvidenceList(sortedEvs);
         setHistoryList(hists);
       })
-      .catch((err: Error) => setError(err.message || 'Failed to fetch opportunity report and evolution history.'))
-      .finally(() => setLoading(false));
-  }, [opportunityId]);
+      .catch(async (err: Error) => {
+        const message = err.message || 'Failed to fetch opportunity report and evolution history.';
+        if (silent) {
+          setRefreshError(message);
+          return;
+        }
+        // The report endpoint only accepts generation record ids. If this id is a lifecycle
+        // opportunity id (e.g. from an evolution outcome), resolve it via the list endpoint.
+        try {
+          const list = await api.getOpportunities();
+          const match = list.find((o) => o.lifecycle_opportunity_id === opportunityId);
+          if (match) {
+            onNavigate(`#/opportunities/${match.id}`);
+            return;
+          }
+        } catch {
+          // fall through to the original error
+        }
+        setError(message);
+      })
+      .finally(() => {
+        setLoading(false);
+        setRefreshing(false);
+      });
+  }, [opportunityId, projectId, onNavigate]);
 
   useEffect(() => {
     fetchData();
@@ -86,7 +120,7 @@ export const OpportunityDetailView: React.FC<OpportunityDetailViewProps> = ({
         <ErrorBanner
           title="Could Not Load Opportunity Detail"
           message={error || 'Opportunity report was not found.'}
-          onRetry={fetchData}
+          onRetry={() => fetchData()}
         />
       </div>
     );
@@ -94,6 +128,7 @@ export const OpportunityDetailView: React.FC<OpportunityDetailViewProps> = ({
 
 
   const currentLifecycleStatus = report.lifecycle_status ?? null;
+  const linkedPaperIds = new Set(evidenceList.map((ev) => ev.paper_id));
   const supportingPapers = report.supporting_papers ?? [];
   const allSupportingPapersBaseline =
     supportingPapers.length > 0 && supportingPapers.every((p) => p.temporal_role === 'BASELINE');
@@ -124,8 +159,8 @@ export const OpportunityDetailView: React.FC<OpportunityDetailViewProps> = ({
               variant={getLifecycleBadgeVariant(currentLifecycleStatus)}
             />
             <Badge
-              label={`Pipeline Status: ${report.status || 'Not recorded'}`}
-              variant="neutral"
+              label={`Generation Status: ${report.status || 'Not recorded'}`}
+              variant={getGenerationStatusBadgeVariant(report.status)}
             />
             <Badge
               label="Model-Generated Proposal"
@@ -133,12 +168,13 @@ export const OpportunityDetailView: React.FC<OpportunityDetailViewProps> = ({
             />
           </div>
           <button
-            onClick={fetchData}
+            onClick={() => fetchData(true)}
             className="btn btn-secondary btn-sm"
             title="Refresh details"
+            disabled={refreshing}
           >
-            <RefreshCw size={14} />
-            <span>Refresh</span>
+            <RefreshCw size={14} className={refreshing ? 'spin' : undefined} />
+            <span>{refreshing ? 'Refreshing…' : 'Refresh'}</span>
           </button>
         </div>
 
@@ -147,11 +183,14 @@ export const OpportunityDetailView: React.FC<OpportunityDetailViewProps> = ({
         </h1>
 
         <div className="u-row u-wrap u-row-loose detail-id-row">
-          <span>Opportunity ID: {report.opportunity_id}</span>
-          <span>Gap ID: {report.gap_id}</span>
-          {report.lifecycle_opportunity_id && (
-            <span>Lifecycle ID: {report.lifecycle_opportunity_id}</span>
-          )}
+          <span>Generation record ID: {report.opportunity_id}</span>
+          <span>
+            Gap ID:{' '}
+            <a className="btn-link btn-link-inline" href={`#/gaps/${report.gap_id}`}>{report.gap_id}</a>
+          </span>
+          <span>Lifecycle ID: {report.lifecycle_opportunity_id ?? 'None (not tracked)'}</span>
+          <span>Evidence records: {evidenceList.length}</span>
+          <span>Transitions: {historyList.length}</span>
           <span>Generation Model: <RecordedValue value={report.generation_model} /></span>
         </div>
       </div>
@@ -331,8 +370,32 @@ export const OpportunityDetailView: React.FC<OpportunityDetailViewProps> = ({
           </div>
         </div>
 
-        {/* Right Column: Temporal Evolution Timeline */}
+        {/* Right Column: Evolution control & Temporal Evolution Timeline */}
         <div className="u-stack-lg">
+          {refreshError && (
+            <ErrorBanner
+              title="Could Not Refresh Evidence"
+              message={refreshError}
+              onRetry={() => fetchData(true)}
+            />
+          )}
+          {report.lifecycle_opportunity_id ? (
+            <EvolvePanel
+              projectId={projectId}
+              lifecycleId={report.lifecycle_opportunity_id}
+              opportunityCreatedAt={report.created_at}
+              linkedPaperIds={linkedPaperIds}
+              onEvolved={() => fetchData(true)}
+            />
+          ) : (
+            <div className="inline-note">
+              <Info size={16} />
+              <span>
+                This proposal has generation status {report.status || 'not recorded'} and is not tracked in the
+                opportunity lifecycle (only VALIDATED and REFINED proposals are), so it cannot be evolved.
+              </span>
+            </div>
+          )}
           <div className="card">
             <div className="card-header">
               <div className="u-row">

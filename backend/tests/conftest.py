@@ -8,12 +8,49 @@ monkeypatching ``urllib.request.urlopen`` inject ``PatchedUrlopenOpener`` throug
 downloader's explicit ``opener`` parameter instead. Downloaders built implicitly by
 ``OpenAlexPaperIngestionService`` get it automatically via the autouse fixture below.
 """
+import os
 import urllib.request
+from pathlib import Path
 
 import pytest
 
 from ideagen.ingestion import openalex_ingestion
 from ideagen.ingestion.downloader import OpenAccessPDFDownloader, PDFDownloadError
+
+_PROJECT_DATA_DIR = (Path(__file__).resolve().parents[2] / "data").resolve()
+
+
+def _sqlite_file_inside_project_data(db_url: str | None) -> Path | None:
+    """Returns the database path when ``db_url`` is a SQLite file under the repository's data/ dir."""
+    if not db_url or not db_url.startswith("sqlite") or ":memory:" in db_url:
+        return None
+    raw_path = db_url.split(":///", 1)[-1].split("?", 1)[0]
+    if not raw_path:
+        return None
+    db_path = Path(raw_path).expanduser().resolve()
+    return db_path if _PROJECT_DATA_DIR in db_path.parents else None
+
+
+def pytest_configure(config):
+    """Refuse to run against a real project database.
+
+    Several fixtures connect to IDEAGEN_DATABASE_URL (or the backend .env) and run DDL and test
+    transactions there, and TestClient startup hooks touch the global session factory. Pointing
+    them at e.g. data/demo/*.db would write test data into the demo database.
+    """
+    from ideagen.core.config import get_settings
+
+    for source, url in (
+        ("IDEAGEN_DATABASE_URL", os.environ.get("IDEAGEN_DATABASE_URL")),
+        ("backend settings (.env)", get_settings().database_url),
+    ):
+        db_path = _sqlite_file_inside_project_data(url)
+        if db_path is not None:
+            pytest.exit(
+                f"Refusing to run tests: {source} points at the project database {db_path}. "
+                "Unset IDEAGEN_DATABASE_URL (or use a temporary database) before running pytest.",
+                returncode=4,
+            )
 
 
 class PatchedUrlopenOpener:
