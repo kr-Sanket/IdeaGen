@@ -26,6 +26,7 @@ export function App() {
     activeProjectId,
     setActiveProject,
     createProject,
+    deleteProject,
   } = useProjectContext();
 
   const [activeStatementId, setActiveStatementId] = useState<string | null>(null);
@@ -84,6 +85,7 @@ export function App() {
               activeProjectId={activeProjectId}
               onSelectProject={handleSelectProject}
               onCreateProject={createProject}
+              onDeleteProject={deleteProject}
               onNavigate={navigate}
             />
           )}
@@ -106,6 +108,7 @@ export function App() {
             <ProjectOverviewView
               project={activeProject}
               onNavigate={navigate}
+              onDeleteProject={deleteProject}
             />
           )}
 

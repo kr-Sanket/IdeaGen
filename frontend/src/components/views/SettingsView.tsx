@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { Cpu, CheckCircle2, XCircle, Terminal, RefreshCw, ShieldCheck } from 'lucide-react';
+import { useState, useCallback, useEffect } from 'react';
+import { Cpu, CheckCircle2, XCircle, Terminal, RefreshCw, ShieldCheck, Sparkles } from 'lucide-react';
 import { api } from '../../api/client';
 import type { SystemStatus } from '../../types';
 import { ErrorBanner } from '../common/ErrorBanner';
+import { describeModelStatus, describeEndpointStatus } from '../common/providerStatus';
 
 function StatusBadge({ ok, okLabel, badLabel }: { ok: boolean | null; okLabel: string; badLabel: string }) {
   if (ok === null) return <span className="badge badge-default">Checking...</span>;
@@ -13,6 +14,16 @@ function StatusBadge({ ok, okLabel, badLabel }: { ok: boolean | null; okLabel: s
   ) : (
     <span className="badge badge-danger">
       <XCircle size={10} aria-hidden="true" /> {badLabel}
+    </span>
+  );
+}
+
+function DescriptorBadge({ label, variant, tooltip }: { label: string; variant: 'success' | 'danger' | 'default' | 'info' | 'warning'; tooltip?: string }) {
+  return (
+    <span className={`badge badge-${variant}`} title={tooltip}>
+      {variant === 'success' && <CheckCircle2 size={10} aria-hidden="true" />}
+      {variant === 'danger' && <XCircle size={10} aria-hidden="true" />}
+      {label}
     </span>
   );
 }
@@ -40,11 +51,6 @@ export const SettingsView: React.FC = () => {
   }, [refresh]);
 
   const ollama = status?.ollama ?? null;
-  const modelState = (model: string | null) => {
-    if (!model || !ollama) return null;
-    if (!ollama.reachable) return false;
-    return !ollama.missing_models.includes(model);
-  };
 
   return (
     <div className="view-container animate-fade-in">
@@ -128,12 +134,10 @@ export const SettingsView: React.FC = () => {
               <span className="detail-label">LLM ({status?.llm.provider ?? '—'})</span>
               <span className="detail-value u-row" style={{ gap: '0.5rem' }}>
                 <span className="font-mono">{status?.llm.model ?? '—'}</span>
-                {status?.llm.provider === 'ollama' && (
-                  <StatusBadge ok={modelState(status.llm.model)} okLabel="Installed" badLabel="Unavailable" />
-                )}
-                {status?.llm.provider === 'gemini' && (
-                  <StatusBadge ok={Boolean(status.llm.api_key_configured)} okLabel="API key set" badLabel="No API key" />
-                )}
+                {(() => {
+                  const desc = describeModelStatus(status, status?.llm.model ?? null, status?.llm.provider ?? 'unknown');
+                  return <DescriptorBadge label={desc.badgeLabel} variant={desc.badgeVariant} tooltip={desc.tooltip} />;
+                })()}
               </span>
             </div>
             <div className="detail-row">
@@ -143,21 +147,36 @@ export const SettingsView: React.FC = () => {
                   {status?.embedding.model ?? '—'}
                   {status?.embedding.dimension ? ` (${status.embedding.dimension}-dim)` : ''}
                 </span>
-                {status?.embedding.provider === 'ollama' && (
-                  <StatusBadge ok={modelState(status.embedding.model)} okLabel="Installed" badLabel="Unavailable" />
-                )}
+                {(() => {
+                  const desc = describeModelStatus(status, status?.embedding.model ?? null, status?.embedding.provider ?? 'unknown');
+                  return <DescriptorBadge label={desc.badgeLabel} variant={desc.badgeVariant} tooltip={desc.tooltip} />;
+                })()}
               </span>
             </div>
-            {ollama && (
-              <div className="detail-row">
-                <span className="detail-label">Ollama endpoint</span>
-                <span className="detail-value u-row" style={{ gap: '0.5rem' }}>
-                  <span className="font-mono">{status?.llm.base_url ?? status?.embedding.base_url}</span>
-                  <StatusBadge ok={ollama.reachable} okLabel="Reachable" badLabel="Unreachable" />
-                </span>
+            {ollama && (() => {
+              const ep = describeEndpointStatus(status);
+              return (
+                <div className="detail-row">
+                  <span className="detail-label">Ollama endpoint</span>
+                  <span className="detail-value u-row" style={{ gap: '0.5rem' }}>
+                    <span className="font-mono">{status?.llm.base_url ?? status?.embedding.base_url}</span>
+                    <DescriptorBadge label={ep.badgeLabel} variant={ep.badgeVariant} tooltip={ep.tooltip} />
+                  </span>
+                </div>
+              );
+            })()}
+            {ollama && !ollama.reachable && ollama.auto_manage && !ollama.process_running ? (
+              <div className="callout callout-info" style={{ marginTop: '0.5rem', padding: '0.75rem 1rem' }}>
+                <div className="u-row" style={{ gap: '0.5rem', fontSize: '0.8125rem' }}>
+                  <Sparkles size={14} className="text-primary" style={{ flexShrink: 0 }} />
+                  <span>
+                    Ollama lifecycle is <strong>auto-managed</strong>. The daemon is currently idle and starts automatically when a research run begins (idle timeout: {ollama.idle_timeout ?? 60}s).
+                  </span>
+                </div>
               </div>
-            )}
-            {ollama?.error && <p className="inline-note is-error" role="alert">{ollama.error}</p>}
+            ) : ollama?.error && (!ollama.auto_manage || ollama.process_running) ? (
+              <p className="inline-note is-error" role="alert">{ollama.error}</p>
+            ) : null}
             {ollama && ollama.reachable && ollama.missing_models.length > 0 && (
               <p className="inline-note is-error" role="alert">
                 Missing models: {ollama.missing_models.join(', ')}. Install with{' '}

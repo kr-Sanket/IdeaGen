@@ -1,10 +1,93 @@
 import { useState, useEffect, useCallback } from 'react';
-import { api } from '../api/client';
-import type { ProjectRecord, ResearchProject } from '../types';
+import { api } from '../api/client.ts';
+import type { ProjectRecord, ResearchProject, ProjectDeleteResponse } from '../types.ts';
 
 const STORAGE_KEY_PROJECTS = 'ideagen_projects_v1';
 const STORAGE_KEY_ACTIVE_PROJECT = 'ideagen_active_project_id';
+const STORAGE_KEY_DELETED_PROJECTS = 'ideagen_deleted_projects_v1';
 const PROJECT_CHANGE_EVENT = 'ideagen_project_change';
+
+const MAX_TOMBSTONES = 200;
+
+export function loadDeletedProjectIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_DELETED_PROJECTS);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return new Set(Array.isArray(parsed) ? parsed : []);
+  } catch {
+    return new Set();
+  }
+}
+
+export function recordDeletedProjectId(id: string): void {
+  const set = loadDeletedProjectIds();
+  set.add(id);
+  const list = Array.from(set);
+  const bounded = list.length > MAX_TOMBSTONES ? list.slice(-MAX_TOMBSTONES) : list;
+  localStorage.setItem(STORAGE_KEY_DELETED_PROJECTS, JSON.stringify(bounded));
+}
+
+export function clearDeletedProjectId(id: string): void {
+  try {
+    const set = loadDeletedProjectIds();
+    if (set.delete(id)) {
+      localStorage.setItem(STORAGE_KEY_DELETED_PROJECTS, JSON.stringify(Array.from(set)));
+    }
+  } catch (err) {
+    console.warn('Failed to clear deleted project id from localStorage:', err);
+  }
+}
+
+const pendingDeletions = new Set<string>();
+
+/**
+ * Removes project-scoped search context and metadata from both localStorage and sessionStorage,
+ * using exact prefix matching to avoid collisions when project IDs overlap (e.g. proj_1 vs proj_1_eval).
+ * Preserves all global keys and other projects' state.
+ */
+export function cleanupProjectBrowserStorage(projectId: string): void {
+  if (!projectId) return;
+
+  const knownPrefixes = ['ideagen_search_state_', 'ideagen_project_'];
+
+  const storages: Storage[] = [];
+  try {
+    if (typeof localStorage !== 'undefined') storages.push(localStorage);
+  } catch {
+    // Ignore
+  }
+  try {
+    if (typeof sessionStorage !== 'undefined') storages.push(sessionStorage);
+  } catch {
+    // Ignore
+  }
+
+  storages.forEach((storage) => {
+    try {
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < storage.length; i++) {
+        const k = storage.key(i);
+        if (!k) continue;
+        if (
+          k === STORAGE_KEY_PROJECTS ||
+          k === STORAGE_KEY_ACTIVE_PROJECT ||
+          k === STORAGE_KEY_DELETED_PROJECTS
+        ) {
+          continue;
+        }
+        // Match exact known prefix followed by the exact projectId (no loose substring matching)
+        const isExactMatch = knownPrefixes.some((prefix) => k === `${prefix}${projectId}`);
+        if (isExactMatch) {
+          keysToRemove.push(k);
+        }
+      }
+      keysToRemove.forEach((k) => storage.removeItem(k));
+    } catch (err) {
+      console.warn(`Failed scanning storage for project cleanup (${projectId}):`, err);
+    }
+  });
+}
 
 export const DEFAULT_BENCHMARK_PROJECT: ResearchProject = {
   id: 'rag-benchmark',
@@ -116,8 +199,12 @@ export function syncProjectsWithServer(): Promise<void> {
     const serverProjects = await api.listProjects();
     const serverById = new Map(serverProjects.map((p) => [p.id, p]));
     const local = loadStoredProjects();
+    const deletedIds = loadDeletedProjectIds();
 
     for (const project of local) {
+      if (deletedIds.has(project.id)) {
+        continue;
+      }
       const record = serverById.get(project.id);
       // Missing on the server, or registered by an older backend that dropped topic/cutoff:
       // the create call is idempotent and only fills fields the server record lacks.
@@ -126,6 +213,10 @@ export function syncProjectsWithServer(): Promise<void> {
         ((record.temporal_cutoff == null && Boolean(project.temporalCutoff)) ||
           ((!record.topic || record.topic === record.title) && Boolean(project.topic) && project.topic !== project.name));
       if (record === undefined || lacksDetails) {
+        // Consult fresh tombstones immediately before create to guard against concurrent cross-tab deletions
+        if (loadDeletedProjectIds().has(project.id)) {
+          continue;
+        }
         try {
           serverById.set(project.id, await api.createProject(toCreateRequest(project)));
         } catch (err) {
@@ -136,13 +227,14 @@ export function syncProjectsWithServer(): Promise<void> {
       }
     }
 
+    const freshDeletedIds = loadDeletedProjectIds();
     const localIds = new Set(local.map((p) => p.id));
     const merged = [
-      ...local.map((p) => {
+      ...local.filter((p) => !freshDeletedIds.has(p.id)).map((p) => {
         const record = serverById.get(p.id);
         return record ? fromRecord(record, p) : p;
       }),
-      ...serverProjects.filter((p) => !localIds.has(p.id)).map((p) => fromRecord(p)),
+      ...serverProjects.filter((p) => !localIds.has(p.id) && !freshDeletedIds.has(p.id)).map((p) => fromRecord(p)),
     ];
     saveProjects(merged);
     window.dispatchEvent(new CustomEvent(PROJECT_CHANGE_EVENT, { detail: { projects: merged } }));
@@ -168,6 +260,9 @@ export async function createProject(params: {
     temporal_cutoff: params.temporalCutoff || undefined,
   });
 
+  // Explicit positive confirmation of creation clears any tombstone for this ID
+  clearDeletedProjectId(record.id);
+
   const newProject = fromRecord(record);
   const updated = [newProject, ...loadStoredProjects().filter((p) => p.id !== newProject.id)];
   saveProjects(updated);
@@ -192,22 +287,74 @@ export function updateProject(id: string, updates: Partial<ResearchProject>): Re
   return updatedProj;
 }
 
-/** Removes a project from this browser only. Server-side project deletion is not implemented. */
-export function deleteProject(id: string): boolean {
+/**
+ * Permanently deletes a project by invoking the backend endpoint and cleaning up local state
+ * and project-scoped browser storage only after server confirmation.
+ */
+export async function deleteProject(id: string): Promise<ProjectDeleteResponse> {
   if (id === DEFAULT_BENCHMARK_PROJECT.id) {
-    // Cannot delete primary benchmark project
-    return false;
+    throw new Error("The primary benchmark project 'rag-benchmark' cannot be deleted.");
   }
-  const projects = loadStoredProjects();
-  const filtered = projects.filter((p) => p.id !== id);
-  saveProjects(filtered);
 
-  if (getActiveProjectId() === id) {
-    setActiveProjectId(DEFAULT_BENCHMARK_PROJECT.id);
-  } else {
-    window.dispatchEvent(new CustomEvent(PROJECT_CHANGE_EVENT, { detail: { projects: filtered } }));
+  if (pendingDeletions.has(id)) {
+    throw new Error(`Deletion of project '${id}' is already in progress.`);
   }
-  return true;
+  pendingDeletions.add(id);
+
+  try {
+    // 1. Call server API first; local state is preserved if the server rejects or fails
+    const response = await api.deleteProject(id);
+
+    // 2. Prevent resurrection across tabs in concurrent or subsequent sync
+    let syncStorageError: Error | null = null;
+    try {
+      recordDeletedProjectId(id);
+    } catch (err) {
+      syncStorageError = err instanceof Error ? err : new Error(String(err));
+    }
+
+    // 3. Remove from local project list
+    const currentStored = loadStoredProjects();
+    const remaining = currentStored.filter((p) => p.id !== id);
+    saveProjects(remaining);
+
+    // 4. Clean up project-scoped browser storage (localStorage & sessionStorage)
+    cleanupProjectBrowserStorage(id);
+
+    // 5. Active project fallback
+    const currentActive = getActiveProjectId();
+    let newActiveId = currentActive;
+    if (currentActive === id) {
+      // Select rag-benchmark as fallback if it exists and is available
+      const benchmarkAvailable = remaining.find((p) => p.id === DEFAULT_BENCHMARK_PROJECT.id);
+      if (benchmarkAvailable) {
+        newActiveId = benchmarkAvailable.id;
+      } else if (remaining.length > 0) {
+        newActiveId = remaining[0].id;
+      } else {
+        newActiveId = '';
+      }
+      setActiveProjectId(newActiveId);
+    }
+
+    // 6. Notify subscribers
+    window.dispatchEvent(
+      new CustomEvent(PROJECT_CHANGE_EVENT, {
+        detail: { projects: remaining, activeProjectId: newActiveId, deletedProjectId: id },
+      })
+    );
+
+    // If recording cross-tab sync failed, report it truthfully while preserving confirmed backend deletion
+    if (syncStorageError) {
+      throw new Error(
+        `Project was deleted on the server, but cross-tab synchronization storage failed: ${syncStorageError.message}`
+      );
+    }
+
+    return response;
+  } finally {
+    pendingDeletions.delete(id);
+  }
 }
 
 export function useProjectContext(): {
@@ -216,7 +363,7 @@ export function useProjectContext(): {
   activeProjectId: string;
   setActiveProject: (id: string) => void;
   createProject: (params: { name: string; topic: string; description?: string; temporalCutoff?: string }) => Promise<ResearchProject>;
-  deleteProject: (id: string) => boolean;
+  deleteProject: (id: string) => Promise<ProjectDeleteResponse>;
 } {
   const [projects, setProjects] = useState<ResearchProject[]>(() => loadStoredProjects());
   const [activeId, setActiveId] = useState<string>(() => getActiveProjectId());
@@ -231,7 +378,11 @@ export function useProjectContext(): {
   useEffect(() => {
     const handleCustomChange = () => sync();
     const handleStorage = (e: StorageEvent) => {
-      if (e.key === STORAGE_KEY_PROJECTS || e.key === STORAGE_KEY_ACTIVE_PROJECT) {
+      if (
+        e.key === STORAGE_KEY_PROJECTS ||
+        e.key === STORAGE_KEY_ACTIVE_PROJECT ||
+        e.key === STORAGE_KEY_DELETED_PROJECTS
+      ) {
         sync();
       }
     };
@@ -260,13 +411,11 @@ export function useProjectContext(): {
     return p;
   }, []);
 
-  const handleDelete = useCallback((id: string) => {
-    const ok = deleteProject(id);
-    if (ok) {
-      setProjects(loadStoredProjects());
-      setActiveId(getActiveProjectId());
-    }
-    return ok;
+  const handleDelete = useCallback(async (id: string) => {
+    const res = await deleteProject(id);
+    setProjects(loadStoredProjects());
+    setActiveId(getActiveProjectId());
+    return res;
   }, []);
 
   return {

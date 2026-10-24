@@ -10,7 +10,7 @@ from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional, Dict, Any
 from sqlalchemy.orm import Session
-from sqlalchemy import text, func, distinct
+from sqlalchemy import text, func, distinct, or_
 from sqlalchemy.exc import SQLAlchemyError
 import json
 import logging
@@ -19,7 +19,7 @@ import datetime
 import tempfile
 import threading
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -32,10 +32,13 @@ from ideagen.db import (
     ResearchKnowledge,
     ResearchStatement,
     ResearchGap,
+    GapEvidence,
     Opportunity,
     OpportunityEvidence,
     OpportunityHistory,
     ResearchOpportunityRecord,
+    PriorArtAssessmentRecord,
+    OpportunityRefinementRecord,
     ExperimentMetadataRecord,
     SQLAlchemyPersistenceLayer,
     ResearchProjectRecord,
@@ -83,6 +86,8 @@ from ideagen.api.schema import (
     RunDTO,
     RunCreateRequestDTO,
     RunLogsDTO,
+    ProjectDeleteSummaryDTO,
+    ProjectDeleteResponseDTO,
 )
 from ideagen.pipeline.workflow_engine import WorkflowEngine
 from ideagen.api.demo_service import build_demo_scenario
@@ -904,83 +909,100 @@ def generate_opportunity_from_gap(
     if gap.status != "VALIDATED":
         raise HTTPException(status_code=400, detail=f"Gap {gap_id} must be VALIDATED before opportunity generation (current status: {gap.status}).")
 
-    evidence_records = persistence.get_gap_evidence(gap_id)
-    stmt_ids = [e.statement_id for e in evidence_records]
-    paper_ids = list({e.paper_id for e in evidence_records})
+    target_project_id = gap.project_id or (project_id.strip() if project_id and project_id.strip() else None)
+    lock = _project_run_lock(target_project_id) if target_project_id else nullcontext()
 
-    # Fetch statement texts
-    supporting_stmts = db.query(ResearchStatement).filter(ResearchStatement.id.in_(stmt_ids)).all() if stmt_ids else []
-    stmt_texts = [s.statement_text for s in supporting_stmts]
-    methods = [s.statement_text for s in supporting_stmts if s.statement_type in {"METHOD", "METHODOLOGY", "BASELINE"}]
+    with lock:
+        # Revalidate project and parent gap existence under lock
+        if target_project_id:
+            _require_project(db, target_project_id)
+        gap = persistence.get_research_gap(gap_id)
+        if not gap:
+            raise HTTPException(status_code=404, detail=f"Research gap {gap_id} not found.")
 
-    input_dto = ResearchOpportunityInputDTO(
-        gap_id=gap.id,
-        gap_statement=gap.gap_statement,
-        research_problem=gap.research_problem,
-        supporting_statement_ids=stmt_ids,
-        supporting_paper_ids=paper_ids,
-        supporting_statements_text=stmt_texts,
-        recurring_limitations=gap.limitations or [],
-        future_work_statements=gap.future_work or [],
-        existing_methods=methods,
-    )
+        if _outside_project(gap.project_id, project_id):
+            raise HTTPException(status_code=404, detail=f"Research gap {gap_id} does not belong to project {project_id}.")
 
-    # Initialize Phase 4 vector index & embedder using configured provider
-    embedder = get_default_embedding_provider()
-    dimension = embedder.dimension
-    vector_index = StatementVectorIndex(dimension=dimension)
+        if gap.status != "VALIDATED":
+            raise HTTPException(status_code=400, detail=f"Gap {gap_id} must be VALIDATED before opportunity generation (current status: {gap.status}).")
 
-    # Resolve effective cutoff (from query param or gap metadata)
-    effective_cutoff = cutoff_date
-    if not effective_cutoff and gap.metadata_json and isinstance(gap.metadata_json, dict):
-        effective_cutoff = gap.metadata_json.get("temporal_cutoff")
+        evidence_records = persistence.get_gap_evidence(gap_id)
+        stmt_ids = [e.statement_id for e in evidence_records]
+        paper_ids = list({e.paper_id for e in evidence_records})
 
-    # Populate FAISS index from db statements using genuine embeddings
-    if effective_cutoff:
-        from ideagen.discovery.temporal import filter_statements_by_cutoff
-        all_stmts = persistence.get_all_research_statements(cutoff_date=effective_cutoff)
-        all_stmts = filter_statements_by_cutoff(all_stmts, effective_cutoff)
-    else:
-        all_stmts = db.query(ResearchStatement).all()
-    if gap.project_id:
-        # Prior-art evidence comes from the gap's own project corpus only.
-        project_paper_ids = {
-            row[0] for row in db.query(ProjectPaperRecord.paper_id).filter(ProjectPaperRecord.project_id == gap.project_id).all()
-        }
-        all_stmts = [s for s in all_stmts if s.paper_id in project_paper_ids]
+        # Fetch statement texts
+        supporting_stmts = db.query(ResearchStatement).filter(ResearchStatement.id.in_(stmt_ids)).all() if stmt_ids else []
+        stmt_texts = [s.statement_text for s in supporting_stmts]
+        methods = [s.statement_text for s in supporting_stmts if s.statement_type in {"METHOD", "METHODOLOGY", "BASELINE"}]
 
-    if all_stmts:
-        stmt_texts_to_embed = [s.statement_text for s in all_stmts]
-        stmt_vectors = embedder.embed_texts(stmt_texts_to_embed)
-        vector_index.add_statements(all_stmts, stmt_vectors)
-
-    llm = get_default_llm_provider()
-    pipeline = ResearchOpportunityPipeline(
-        vector_index=vector_index,
-        embedder=embedder,
-        llm_provider=llm,
-        max_refinement_iterations=2,
-    )
-
-    try:
-        # Project scope is inherited from the gap when the records are persisted.
-        opp_dto = pipeline.process_validated_gap(input_dto=input_dto, db_session=db)
-    except SQLAlchemyError as e:
-        # Database messages include SQL and parameters; log them, but do not return them.
-        logger.error(f"Opportunity generation failed for gap {gap_id} while saving: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Opportunity generation failed: a database error occurred while saving the opportunity; nothing was saved.",
+        input_dto = ResearchOpportunityInputDTO(
+            gap_id=gap.id,
+            gap_statement=gap.gap_statement,
+            research_problem=gap.research_problem,
+            supporting_statement_ids=stmt_ids,
+            supporting_paper_ids=paper_ids,
+            supporting_statements_text=stmt_texts,
+            recurring_limitations=gap.limitations or [],
+            future_work_statements=gap.future_work or [],
+            existing_methods=methods,
         )
-    except Exception as e:
-        logger.error(f"Opportunity generation failed for gap {gap_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=502 if _is_provider_error(e) else 500, detail=f"Opportunity generation failed: {e}")
 
-    report_service = OpportunityReportService(db)
-    report = report_service.generate_opportunity_report(opp_dto.id)
-    if not report:
-        raise HTTPException(status_code=500, detail="Failed to compile opportunity report.")
-    return report
+        # Initialize Phase 4 vector index & embedder using configured provider
+        embedder = get_default_embedding_provider()
+        dimension = embedder.dimension
+        vector_index = StatementVectorIndex(dimension=dimension)
+
+        # Resolve effective cutoff (from query param or gap metadata)
+        effective_cutoff = cutoff_date
+        if not effective_cutoff and gap.metadata_json and isinstance(gap.metadata_json, dict):
+            effective_cutoff = gap.metadata_json.get("temporal_cutoff")
+
+        # Populate FAISS index from db statements using genuine embeddings
+        if effective_cutoff:
+            from ideagen.discovery.temporal import filter_statements_by_cutoff
+            all_stmts = persistence.get_all_research_statements(cutoff_date=effective_cutoff)
+            all_stmts = filter_statements_by_cutoff(all_stmts, effective_cutoff)
+        else:
+            all_stmts = db.query(ResearchStatement).all()
+        if gap.project_id:
+            # Prior-art evidence comes from the gap's own project corpus only.
+            project_paper_ids = {
+                row[0] for row in db.query(ProjectPaperRecord.paper_id).filter(ProjectPaperRecord.project_id == gap.project_id).all()
+            }
+            all_stmts = [s for s in all_stmts if s.paper_id in project_paper_ids]
+
+        if all_stmts:
+            stmt_texts_to_embed = [s.statement_text for s in all_stmts]
+            stmt_vectors = embedder.embed_texts(stmt_texts_to_embed)
+            vector_index.add_statements(all_stmts, stmt_vectors)
+
+        llm = get_default_llm_provider()
+        pipeline = ResearchOpportunityPipeline(
+            vector_index=vector_index,
+            embedder=embedder,
+            llm_provider=llm,
+            max_refinement_iterations=2,
+        )
+
+        try:
+            # Project scope is inherited from the gap when the records are persisted.
+            opp_dto = pipeline.process_validated_gap(input_dto=input_dto, db_session=db)
+        except SQLAlchemyError as e:
+            # Database messages include SQL and parameters; log them, but do not return them.
+            logger.error(f"Opportunity generation failed for gap {gap_id} while saving: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail="Opportunity generation failed: a database error occurred while saving the opportunity; nothing was saved.",
+            )
+        except Exception as e:
+            logger.error(f"Opportunity generation failed for gap {gap_id}: {e}", exc_info=True)
+            raise HTTPException(status_code=502 if _is_provider_error(e) else 500, detail=f"Opportunity generation failed: {e}")
+
+        report_service = OpportunityReportService(db)
+        report = report_service.generate_opportunity_report(opp_dto.id)
+        if not report:
+            raise HTTPException(status_code=500, detail="Failed to compile opportunity report.")
+        return report
 
 
 @app.get("/api/v1/opportunities", response_model=List[OpportunityListItemDTO])
@@ -1095,164 +1117,178 @@ def evolve_opportunity(
     classifier: RelationshipClassifier = Depends(get_relationship_classifier),
 ):
     """Evolves an opportunity's lifecycle status using independently verified paper evidence."""
-    opp = resolve_lifecycle_opportunity(opportunity_id, db, create_if_missing=True)
-    if opp is None:
-        raise HTTPException(status_code=404, detail=f"Opportunity {opportunity_id} not found.")
-    if _outside_project(opp.project_id, project_id):
-        raise HTTPException(status_code=404, detail=f"Opportunity {opportunity_id} not found in project {project_id}.")
-    initial_status = opp.status
+    opp_pre = resolve_lifecycle_opportunity(opportunity_id, db, create_if_missing=False)
+    target_project_id = opp_pre.project_id if opp_pre else None
+    if not target_project_id:
+        rec = db.query(ResearchOpportunityRecord).filter(ResearchOpportunityRecord.id == opportunity_id).first()
+        if rec and rec.project_id:
+            target_project_id = rec.project_id
+    if not target_project_id and project_id and project_id.strip():
+        target_project_id = project_id.strip()
 
-    if not req.paper_ids:
-        raise HTTPException(status_code=400, detail="paper_ids list cannot be empty.")
-    if len(req.paper_ids) > 100:
-        raise HTTPException(status_code=400, detail="Maximum 100 paper IDs allowed per request.")
+    lock = _project_run_lock(target_project_id) if target_project_id else nullcontext()
+    with lock:
+        if target_project_id:
+            _require_project(db, target_project_id)
+        opp = resolve_lifecycle_opportunity(opportunity_id, db, create_if_missing=True)
+        if opp is None:
+            raise HTTPException(status_code=404, detail=f"Opportunity {opportunity_id} not found.")
+        effective_scope = target_project_id or project_id
+        if _outside_project(opp.project_id, effective_scope):
+            raise HTTPException(status_code=404, detail=f"Opportunity {opportunity_id} not found in project {effective_scope}.")
+        initial_status = opp.status
 
-    # Validate cutoff date if provided
-    norm_cutoff: Optional[datetime.date] = None
-    if req.cutoff_date is not None:
-        from ideagen.discovery.temporal import normalize_cutoff_date
-        try:
-            norm_cutoff = normalize_cutoff_date(req.cutoff_date)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Invalid cutoff date: {e}")
+        if not req.paper_ids:
+            raise HTTPException(status_code=400, detail="paper_ids list cannot be empty.")
+        if len(req.paper_ids) > 100:
+            raise HTTPException(status_code=400, detail="Maximum 100 paper IDs allowed per request.")
 
-    # Lower temporal bound: only papers published on/after the opportunity existed can be
-    # evolution evidence (same rule as incremental post-ingestion evolution).
-    from ideagen.opportunity.incremental import get_opportunity_effective_creation_date
-    opp_date = get_opportunity_effective_creation_date(opp)
+        # Validate cutoff date if provided
+        norm_cutoff: Optional[datetime.date] = None
+        if req.cutoff_date is not None:
+            from ideagen.discovery.temporal import normalize_cutoff_date
+            try:
+                norm_cutoff = normalize_cutoff_date(req.cutoff_date)
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Invalid cutoff date: {e}")
 
-    if norm_cutoff is not None:
-        # Ensure the opportunity itself existed at or before the requested cutoff
-        if opp_date is not None:
-            if opp_date > norm_cutoff:
+        # Lower temporal bound: only papers published on/after the opportunity existed can be
+        # evolution evidence (same rule as incremental post-ingestion evolution).
+        from ideagen.opportunity.incremental import get_opportunity_effective_creation_date
+        opp_date = get_opportunity_effective_creation_date(opp)
+
+        if norm_cutoff is not None:
+            # Ensure the opportunity itself existed at or before the requested cutoff
+            if opp_date is not None:
+                if opp_date > norm_cutoff:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Opportunity {opportunity_id} was created on {opp_date.isoformat()}, "
+                            f"which is after the requested cutoff date {norm_cutoff.isoformat()}."
+                        ),
+                    )
+
+        # Validate paper existence
+        papers = db.query(Paper).filter(Paper.id.in_(req.paper_ids)).all()
+        found_map = {p.id: p for p in papers}
+        missing_ids = [pid for pid in req.paper_ids if pid not in found_map]
+        if missing_ids:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Papers not found: {', '.join(str(pid) for pid in missing_ids)}",
+            )
+        if effective_scope:
+            # Evolution evidence for a project's opportunity must come from that project's corpus.
+            in_project = {
+                row[0] for row in db.query(ProjectPaperRecord.paper_id).filter(
+                    ProjectPaperRecord.project_id == effective_scope,
+                    ProjectPaperRecord.paper_id.in_(req.paper_ids),
+                ).all()
+            }
+            outside = [pid for pid in req.paper_ids if pid not in in_project]
+            if outside:
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        f"Opportunity {opportunity_id} was created on {opp_date.isoformat()}, "
-                        f"which is after the requested cutoff date {norm_cutoff.isoformat()}."
-                    ),
+                    detail=f"Papers are not in project {effective_scope}'s corpus: {', '.join(str(pid) for pid in outside)}",
                 )
 
-    # Validate paper existence
-    papers = db.query(Paper).filter(Paper.id.in_(req.paper_ids)).all()
-    found_map = {p.id: p for p in papers}
-    missing_ids = [pid for pid in req.paper_ids if pid not in found_map]
-    if missing_ids:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Papers not found: {', '.join(str(pid) for pid in missing_ids)}",
-        )
-    if project_id:
-        # Evolution evidence for a project's opportunity must come from that project's corpus.
-        in_project = {
-            row[0] for row in db.query(ProjectPaperRecord.paper_id).filter(
-                ProjectPaperRecord.project_id == project_id,
-                ProjectPaperRecord.paper_id.in_(req.paper_ids),
-            ).all()
-        }
-        outside = [pid for pid in req.paper_ids if pid not in in_project]
-        if outside:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Papers are not in project {project_id}'s corpus: {', '.join(str(pid) for pid in outside)}",
-            )
+        # Exclude papers already recorded for this opportunity
+        existing_evidences = db.query(OpportunityEvidence).filter(
+            OpportunityEvidence.opportunity_id == opp.id
+        ).all()
+        already_recorded_ids = {ev.paper_id for ev in existing_evidences}
 
-    # Exclude papers already recorded for this opportunity
-    existing_evidences = db.query(OpportunityEvidence).filter(
-        OpportunityEvidence.opportunity_id == opp.id
-    ).all()
-    already_recorded_ids = {ev.paper_id for ev in existing_evidences}
+        # Partition into eligible vs skipped
+        eligible_papers: List[Paper] = []
+        skipped_count = 0
+        errors: List[PaperEvolutionErrorDTO] = []
+        events: List[OpportunityEvolutionEventDTO] = []
 
-    # Partition into eligible vs skipped
-    eligible_papers: List[Paper] = []
-    skipped_count = 0
-    errors: List[PaperEvolutionErrorDTO] = []
-    events: List[OpportunityEvolutionEventDTO] = []
-
-    for pid in req.paper_ids:
-        p = found_map[pid]
-        if p.id in already_recorded_ids:
-            skipped_count += 1
-            continue
-
-        if norm_cutoff is not None or opp_date is not None:
-            if p.publication_date is None:
+        for pid in req.paper_ids:
+            p = found_map[pid]
+            if p.id in already_recorded_ids:
                 skipped_count += 1
                 continue
-        if norm_cutoff is not None and p.publication_date > norm_cutoff:
-            skipped_count += 1
-            continue
-        if opp_date is not None and p.publication_date < opp_date:
-            skipped_count += 1
-            continue
 
-        eligible_papers.append(p)
+            if norm_cutoff is not None or opp_date is not None:
+                if p.publication_date is None:
+                    skipped_count += 1
+                    continue
+            if norm_cutoff is not None and p.publication_date > norm_cutoff:
+                skipped_count += 1
+                continue
+            if opp_date is not None and p.publication_date < opp_date:
+                skipped_count += 1
+                continue
 
-    processed_count = 0
-    failed_count = 0
+            eligible_papers.append(p)
 
-    if eligible_papers:
-        from ideagen.opportunity.service import OpportunityTransitionService
-        from ideagen.opportunity.integration import OpportunityClassificationIntegration
-        from ideagen.opportunity.temporal import OpportunityEvolutionService, TemporalBatch
+        processed_count = 0
+        failed_count = 0
 
-        trans_service = OpportunityTransitionService(db)
-        integration = OpportunityClassificationIntegration(classifier, trans_service, db)
-        evolution_service = OpportunityEvolutionService(integration)
+        if eligible_papers:
+            from ideagen.opportunity.service import OpportunityTransitionService
+            from ideagen.opportunity.integration import OpportunityClassificationIntegration
+            from ideagen.opportunity.temporal import OpportunityEvolutionService, TemporalBatch
 
-        start_date = opp_date if opp_date is not None else datetime.date(1900, 1, 1)
-        end_date = norm_cutoff if norm_cutoff is not None else datetime.date(2100, 1, 1)
-        batch = TemporalBatch(
-            batch_id=f"evolve_{uuid.uuid4().hex[:8]}",
-            start_date=start_date,
-            end_date=end_date,
-            sequence_number=1,
-        )
+            trans_service = OpportunityTransitionService(db)
+            integration = OpportunityClassificationIntegration(classifier, trans_service, db)
+            evolution_service = OpportunityEvolutionService(integration)
 
-        for p in eligible_papers:
-            try:
-                batch_res = evolution_service.process_batch(
-                    db=db,
-                    opportunity_id=opp.id,
-                    batch=batch,
-                    papers=[p],
-                )
-                processed_count += batch_res.processed_paper_count
-                skipped_count += batch_res.skipped_paper_count
-                for ev in batch_res.events:
-                    events.append(
-                        OpportunityEvolutionEventDTO(
-                            paper_id=ev.paper_id,
-                            relationship=ev.relationship.value,
-                            previous_status=ev.previous_status.value,
-                            new_status=ev.new_status.value,
-                            state_changed=ev.state_changed,
-                            evidence_id=ev.evidence_id,
-                            history_id=ev.history_id,
+            start_date = opp_date if opp_date is not None else datetime.date(1900, 1, 1)
+            end_date = norm_cutoff if norm_cutoff is not None else datetime.date(2100, 1, 1)
+            batch = TemporalBatch(
+                batch_id=f"evolve_{uuid.uuid4().hex[:8]}",
+                start_date=start_date,
+                end_date=end_date,
+                sequence_number=1,
+            )
+
+            for p in eligible_papers:
+                try:
+                    batch_res = evolution_service.process_batch(
+                        db=db,
+                        opportunity_id=opp.id,
+                        batch=batch,
+                        papers=[p],
+                    )
+                    processed_count += batch_res.processed_paper_count
+                    skipped_count += batch_res.skipped_paper_count
+                    for ev in batch_res.events:
+                        events.append(
+                            OpportunityEvolutionEventDTO(
+                                paper_id=ev.paper_id,
+                                relationship=ev.relationship.value,
+                                previous_status=ev.previous_status.value,
+                                new_status=ev.new_status.value,
+                                state_changed=ev.state_changed,
+                                evidence_id=ev.evidence_id,
+                                history_id=ev.history_id,
+                            )
+                        )
+                except Exception as e:
+                    failed_count += 1
+                    errors.append(
+                        PaperEvolutionErrorDTO(
+                            paper_id=p.id,
+                            reason="Classification or transition failed for paper.",
                         )
                     )
-            except Exception as e:
-                failed_count += 1
-                errors.append(
-                    PaperEvolutionErrorDTO(
-                        paper_id=p.id,
-                        reason="Classification or transition failed for paper.",
-                    )
-                )
 
-    db.commit()
-    db.refresh(opp)
+        db.commit()
+        db.refresh(opp)
 
-    return OpportunityEvolveResponse(
-        opportunity_id=opp.id,
-        initial_status=initial_status,
-        final_status=opp.status,
-        processed_count=processed_count,
-        skipped_count=skipped_count,
-        failed_count=failed_count,
-        events=events,
-        errors=errors,
-    )
+        return OpportunityEvolveResponse(
+            opportunity_id=opp.id,
+            initial_status=initial_status,
+            final_status=opp.status,
+            processed_count=processed_count,
+            skipped_count=skipped_count,
+            failed_count=failed_count,
+            events=events,
+            errors=errors,
+        )
 
 
 @app.get("/api/v1/opportunities/{opportunity_id}/history", response_model=List[OpportunityHistoryDTO])
@@ -2020,6 +2056,17 @@ def _project_dto(db: Session, project: ResearchProjectRecord) -> ProjectDTO:
     )
 
 
+PROTECTED_PROJECT_IDS: frozenset[str] = frozenset({"rag-benchmark"})
+
+_project_run_locks: Dict[str, threading.Lock] = {}
+_project_run_locks_guard = threading.Lock()
+
+
+def _project_run_lock(project_id: str) -> threading.Lock:
+    with _project_run_locks_guard:
+        return _project_run_locks.setdefault(project_id, threading.Lock())
+
+
 def _require_project(db: Session, project_id: str) -> ResearchProjectRecord:
     project = db.query(ResearchProjectRecord).filter(ResearchProjectRecord.id == project_id).first()
     if not project:
@@ -2087,6 +2134,187 @@ def create_project(req: ProjectCreateDTO, db: Session = Depends(get_db)):
 def get_project(project_id: str, db: Session = Depends(get_db)):
     """Retrieves project metadata and project-scoped counts."""
     return _project_dto(db, _require_project(db, project_id))
+
+
+@app.delete("/api/v1/projects/{project_id}", response_model=ProjectDeleteResponseDTO)
+def delete_project(project_id: str, db: Session = Depends(get_db)):
+    """Deletes all project-owned runs, selections, gaps, and opportunities in one atomic transaction.
+
+    Shared literature ('papers', 'paper_documents', 'paper_passages', 'research_knowledge',
+    'research_statements') and the derived whole-corpus FAISS index are strictly preserved.
+    """
+    normalized_project_id = project_id.strip() if project_id else ""
+    if not normalized_project_id:
+        raise HTTPException(status_code=404, detail="Research project not found.")
+
+    if normalized_project_id in PROTECTED_PROJECT_IDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete protected benchmark project '{normalized_project_id}'."
+        )
+
+    # 1. Acquire per-project run lock to serialize against run creation and concurrent deletions
+    with _project_run_lock(normalized_project_id):
+        # 2. Acquire discovery lock for this project to ensure no concurrent gap discovery
+        with _discovery_lock_mgr.acquire(normalized_project_id):
+            # 3. Verify project exists inside locks
+            _require_project(db, normalized_project_id)
+
+            # 4. Check for active runs (recovering any dead/interrupted runs first)
+            WorkflowEngine.recover_interrupted_runs(db)
+            active_runs = db.query(ResearchRunRecord).filter(
+                (ResearchRunRecord.project_id == normalized_project_id) &
+                (ResearchRunRecord.status.in_(["PENDING", "RUNNING"]))
+            ).all()
+            for ar in active_runs:
+                if WorkflowEngine.is_run_active(ar.id) or ar.status == "RUNNING":
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Cannot delete project '{normalized_project_id}': research run '{ar.id}' is currently active."
+                    )
+
+            summary = ProjectDeleteSummaryDTO()
+            deleted_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+            try:
+                def _chunked(items: List[Any], size: int = 500):
+                    for i in range(0, len(items), size):
+                        yield items[i : i + size]
+
+                # Step 1: Collect project-owned IDs
+                gap_ids = [row[0] for row in db.query(ResearchGap.id).filter(ResearchGap.project_id == normalized_project_id).all()]
+
+                res_opp_query_filters = [ResearchOpportunityRecord.project_id == normalized_project_id]
+                if gap_ids:
+                    res_opp_query_filters.append(ResearchOpportunityRecord.gap_id.in_(gap_ids))
+                res_opp_ids = [row[0] for row in db.query(ResearchOpportunityRecord.id).filter(or_(*res_opp_query_filters)).all()]
+
+                opp_query_filters = [Opportunity.project_id == normalized_project_id]
+                if gap_ids:
+                    opp_query_filters.append(Opportunity.gap_id.in_(gap_ids))
+                if res_opp_ids:
+                    opp_query_filters.append(Opportunity.research_opportunity_id.in_(res_opp_ids))
+                opp_ids = [row[0] for row in db.query(Opportunity.id).filter(or_(*opp_query_filters)).all()]
+
+                run_ids = [row[0] for row in db.query(ResearchRunRecord.id).filter(ResearchRunRecord.project_id == normalized_project_id).all()]
+
+                # Step 2: Delete Lifecycle Opportunity Children
+                if opp_ids:
+                    for chunk in _chunked(opp_ids):
+                        summary.opportunity_evidence_deleted += (
+                            db.query(OpportunityEvidence)
+                            .filter(OpportunityEvidence.opportunity_id.in_(chunk))
+                            .delete(synchronize_session=False)
+                        )
+                        summary.opportunity_history_deleted += (
+                            db.query(OpportunityHistory)
+                            .filter(OpportunityHistory.opportunity_id.in_(chunk))
+                            .delete(synchronize_session=False)
+                        )
+
+                # Step 3: Delete Lifecycle Opportunities
+                if opp_ids:
+                    for chunk in _chunked(opp_ids):
+                        summary.lifecycle_opportunities_deleted += (
+                            db.query(Opportunity)
+                            .filter(Opportunity.id.in_(chunk))
+                            .delete(synchronize_session=False)
+                        )
+
+                # Step 4: Delete Research Opportunity Children
+                if res_opp_ids:
+                    for chunk in _chunked(res_opp_ids):
+                        summary.prior_art_assessments_deleted += (
+                            db.query(PriorArtAssessmentRecord)
+                            .filter(PriorArtAssessmentRecord.opportunity_id.in_(chunk))
+                            .delete(synchronize_session=False)
+                        )
+                        summary.refinement_iterations_deleted += (
+                            db.query(OpportunityRefinementRecord)
+                            .filter(OpportunityRefinementRecord.opportunity_id.in_(chunk))
+                            .delete(synchronize_session=False)
+                        )
+
+                # Step 5: Delete Research Opportunities
+                if res_opp_ids:
+                    for chunk in _chunked(res_opp_ids):
+                        summary.research_opportunities_deleted += (
+                            db.query(ResearchOpportunityRecord)
+                            .filter(ResearchOpportunityRecord.id.in_(chunk))
+                            .delete(synchronize_session=False)
+                        )
+
+                # Step 6: Delete Gap Evidence
+                if gap_ids:
+                    for chunk in _chunked(gap_ids):
+                        summary.gap_evidence_deleted += (
+                            db.query(GapEvidence)
+                            .filter(GapEvidence.gap_id.in_(chunk))
+                            .delete(synchronize_session=False)
+                        )
+
+                # Step 7: Delete Research Gaps
+                if gap_ids:
+                    for chunk in _chunked(gap_ids):
+                        summary.gaps_deleted += (
+                            db.query(ResearchGap)
+                            .filter(ResearchGap.id.in_(chunk))
+                            .delete(synchronize_session=False)
+                        )
+
+                # Step 8: Delete Run Paper Records & Research Runs
+                if run_ids:
+                    for chunk in _chunked(run_ids):
+                        summary.run_papers_deleted += (
+                            db.query(RunPaperRecord)
+                            .filter(RunPaperRecord.run_id.in_(chunk))
+                            .delete(synchronize_session=False)
+                        )
+                        summary.runs_deleted += (
+                            db.query(ResearchRunRecord)
+                            .filter(ResearchRunRecord.id.in_(chunk))
+                            .delete(synchronize_session=False)
+                        )
+
+                # Step 9: Delete Paper Selections
+                summary.selections_deleted = (
+                    db.query(ProjectPaperSelectionRecord)
+                    .filter(ProjectPaperSelectionRecord.project_id == normalized_project_id)
+                    .delete(synchronize_session=False)
+                )
+
+                # Step 10: Delete Project-Paper Links (ProjectPaperRecord)
+                # Preserves shared literature in papers, paper_documents, paper_passages,
+                # research_knowledge, and research_statements.
+                summary.paper_links_removed = (
+                    db.query(ProjectPaperRecord)
+                    .filter(ProjectPaperRecord.project_id == normalized_project_id)
+                    .delete(synchronize_session=False)
+                )
+
+                # Step 11: Delete Project Record
+                db.query(ResearchProjectRecord).filter(ResearchProjectRecord.id == normalized_project_id).delete(synchronize_session=False)
+
+                # Commit all deletions atomically
+                db.commit()
+            except HTTPException:
+                db.rollback()
+                raise
+            except Exception as e:
+                db.rollback()
+                logger.error(f"Failed to delete project '{normalized_project_id}': {e}", exc_info=True)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to delete research project '{normalized_project_id}': an internal database error occurred."
+                )
+
+    return ProjectDeleteResponseDTO(
+        project_id=normalized_project_id,
+        deleted=True,
+        deleted_at=deleted_at,
+        summary=summary,
+    )
+
 
 
 # ── Paper Selections (Server Persisted) ──────────────────────────────────
@@ -2228,13 +2456,6 @@ def preflight_custom_papers(
 
 # ── Research Runs ────────────────────────────────────────────────────────
 
-_project_run_locks: Dict[str, threading.Lock] = {}
-_project_run_locks_guard = threading.Lock()
-
-
-def _project_run_lock(project_id: str) -> threading.Lock:
-    with _project_run_locks_guard:
-        return _project_run_locks.setdefault(project_id, threading.Lock())
 
 
 @app.post("/api/v1/projects/{project_id}/runs", response_model=RunDTO)
@@ -2248,10 +2469,10 @@ def create_research_run(
     Runs execute INGESTION, UNDERSTANDING and GAP_DISCOVERY only. Opportunity generation is never
     part of a run; it is triggered explicitly per VALIDATED gap after researcher review.
     """
-    _require_project(db, project_id)
     # Check, create and start under a per-project lock so two concurrent requests cannot both
     # pass the "no active run" check and start parallel runs for the same project.
     with _project_run_lock(project_id):
+        _require_project(db, project_id)
         active_runs = db.query(ResearchRunRecord).filter(
             (ResearchRunRecord.project_id == project_id) & (ResearchRunRecord.status.in_(["PENDING", "RUNNING"]))
         ).all()

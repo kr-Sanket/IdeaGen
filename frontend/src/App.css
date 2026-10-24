@@ -936,6 +936,7 @@ button.stat-card {
   justify-content: space-between;
   gap: 1.25rem;
   min-width: 0;
+  cursor: pointer;
 }
 
 .project-card:hover {
@@ -1482,6 +1483,7 @@ button.stat-card {
   gap: 1.5rem;
   width: 100%;
   min-width: 0;
+  margin-bottom: 2rem;
 }
 
 @media (min-width: 1024px) {
@@ -1925,7 +1927,7 @@ button.stat-card {
   box-shadow: var(--shadow-modal);
   max-width: 680px;
   width: 100%;
-  max-height: 88vh;
+  max-height: min(88vh, 850px);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1939,6 +1941,7 @@ button.stat-card {
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
+  flex-shrink: 0;
 }
 
 .modal-title {
@@ -1951,7 +1954,8 @@ button.stat-card {
 .modal-body {
   padding: 1.75rem;
   overflow-y: auto;
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 1.25rem;
@@ -1965,6 +1969,7 @@ button.stat-card {
   align-items: center;
   justify-content: flex-end;
   gap: 0.75rem;
+  flex-shrink: 0;
 }
 
 /* Evidence Sliding Drawer */
@@ -2923,8 +2928,27 @@ button.stat-card {
   border-top: 1px solid var(--border-subtle);
 }
 
+.preflight-modal {
+  max-width: 820px;
+  max-height: min(88vh, 850px);
+  display: flex;
+  flex-direction: column;
+}
+
 .preflight-modal .modal-body {
-  gap: 1rem;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  gap: 1.25rem;
+  padding: 1.75rem 1.75rem 2.5rem 1.75rem;
+}
+
+.preflight-modal .modal-footer {
+  flex-shrink: 0;
+  position: relative;
+  z-index: 2;
+  background: var(--bg-card-subtle);
+  border-top: 1px solid var(--border-subtle);
 }
 
 /* Callout variants */
@@ -3767,10 +3791,22 @@ button.stat-card {
 }
 
 .section-divider {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 1rem;
+  margin-top: 0.5rem;
+  min-width: 0;
+}
+
+hr.section-divider {
+  display: block;
   height: 1px;
   border: none;
   background: var(--border-subtle);
   margin: 0.5rem 0;
+  padding: 0;
 }
 
 .prose-body {
@@ -3881,6 +3917,8 @@ button.stat-card {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   cursor: pointer;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   transition: border-color 0.15s ease, background 0.15s ease;
 }
 

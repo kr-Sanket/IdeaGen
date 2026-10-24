@@ -518,6 +518,28 @@ export interface ProjectCreateRequest {
   temporal_cutoff?: string;
 }
 
+export interface ProjectDeleteSummary {
+  runs_deleted: number;
+  run_papers_deleted: number;
+  selections_deleted: number;
+  paper_links_removed: number;
+  gaps_deleted: number;
+  gap_evidence_deleted: number;
+  research_opportunities_deleted: number;
+  prior_art_assessments_deleted: number;
+  refinement_iterations_deleted: number;
+  lifecycle_opportunities_deleted: number;
+  opportunity_evidence_deleted: number;
+  opportunity_history_deleted: number;
+}
+
+export interface ProjectDeleteResponse {
+  project_id: string;
+  deleted: boolean;
+  deleted_at: string;
+  summary: ProjectDeleteSummary;
+}
+
 export type BackendHealth = 'online' | 'degraded' | 'unreachable';
 
 /** GET /api/v1/system/status: configured providers and live availability (no secrets). */
@@ -530,6 +552,11 @@ export interface SystemStatus {
     installed_models: string[];
     missing_models: string[];
     error: string | null;
+    auto_manage?: boolean;
+    is_owned?: boolean;
+    active_leases?: number;
+    idle_timeout?: number;
+    process_running?: boolean;
   } | null;
   openalex: { email_configured: boolean; proxy: string | null };
 }

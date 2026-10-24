@@ -539,3 +539,27 @@ class RunLogsDTO(BaseModel):
     run_id: str
     status: str
     logs: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+# ── Project Deletion (Stage 1) ──────────────────────────────────────────
+
+class ProjectDeleteSummaryDTO(BaseModel):
+    runs_deleted: int = 0
+    run_papers_deleted: int = 0
+    selections_deleted: int = 0
+    paper_links_removed: int = 0
+    gaps_deleted: int = 0
+    gap_evidence_deleted: int = 0
+    research_opportunities_deleted: int = 0
+    prior_art_assessments_deleted: int = 0
+    refinement_iterations_deleted: int = 0
+    lifecycle_opportunities_deleted: int = 0
+    opportunity_evidence_deleted: int = 0
+    opportunity_history_deleted: int = 0
+
+
+class ProjectDeleteResponseDTO(BaseModel):
+    project_id: str
+    deleted: bool = True
+    deleted_at: str
+    summary: ProjectDeleteSummaryDTO

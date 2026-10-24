@@ -9,15 +9,20 @@ import {
   Calendar,
   Cpu,
   RefreshCw,
+  Trash2,
 } from 'lucide-react';
-import type { ResearchProject, WorkspaceStats, SystemStatus } from '../../types';
+import type { ResearchProject, WorkspaceStats, SystemStatus, ProjectDeleteResponse } from '../../types';
 import { api } from '../../api/client';
+import { deleteProject as defaultDeleteProject } from '../../projects/projectStore';
 import { LoadingState } from '../common/LoadingState';
 import { ErrorBanner } from '../common/ErrorBanner';
+import { DeleteProjectModal } from './DeleteProjectModal';
+import { describeProviderHealth } from '../common/providerStatus';
 
 interface ProjectOverviewViewProps {
   project: ResearchProject;
   onNavigate: (route: string) => void;
+  onDeleteProject?: (projectId: string) => Promise<ProjectDeleteResponse>;
 }
 
 function describeModels(status: SystemStatus | null): string {
@@ -29,20 +34,16 @@ function describeModels(status: SystemStatus | null): string {
   return `${llm} · ${emb}`;
 }
 
-function describeProviderHealth(status: SystemStatus | null): { label: string; ok: boolean } {
-  if (!status) return { label: 'Unknown (status unavailable)', ok: false };
-  if (!status.database.connected) return { label: 'Database error', ok: false };
-  const ollama = status.ollama;
-  if (ollama && !ollama.reachable) return { label: 'Ollama unreachable', ok: false };
-  if (ollama && ollama.missing_models.length > 0) return { label: `Missing model: ${ollama.missing_models.join(', ')}`, ok: false };
-  return { label: 'Database and models available', ok: true };
-}
-
-export const ProjectOverviewView: React.FC<ProjectOverviewViewProps> = ({ project, onNavigate }) => {
+export const ProjectOverviewView: React.FC<ProjectOverviewViewProps> = ({
+  project,
+  onNavigate,
+  onDeleteProject,
+}) => {
   const [stats, setStats] = useState<WorkspaceStats | null>(null);
   const [system, setSystem] = useState<SystemStatus | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState<boolean>(false);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -100,6 +101,18 @@ export const ProjectOverviewView: React.FC<ProjectOverviewViewProps> = ({ projec
             <RefreshCw size={14} aria-hidden="true" />
             <span>Refresh</span>
           </button>
+          {!isBenchmark && (
+            <button
+              type="button"
+              className="btn btn-danger"
+              onClick={() => setIsDeleteModalOpen(true)}
+              title="Permanently delete this project"
+              id="btn-overview-delete-project"
+            >
+              <Trash2 size={14} aria-hidden="true" />
+              <span>Delete Project</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -126,11 +139,35 @@ export const ProjectOverviewView: React.FC<ProjectOverviewViewProps> = ({ projec
             </div>
           </div>
 
-          <div className="u-row" style={{ gap: '0.75rem' }}>
-            <Layers size={18} className="text-emerald" aria-hidden="true" />
+          <div className="u-row" style={{ gap: '0.75rem' }} title={health.tooltip}>
+            <Layers
+              size={18}
+              className={
+                health.variant === 'danger'
+                  ? 'text-danger'
+                  : health.variant === 'warning'
+                    ? 'text-amber'
+                    : health.variant === 'success'
+                      ? 'text-emerald'
+                      : 'text-primary'
+              }
+              aria-hidden="true"
+            />
             <div>
               <span className="label-caps text-tertiary">Provider Status</span>
-              <div className={`font-semibold ${health.ok ? 'text-success' : 'text-danger'}`}>{health.label}</div>
+              <div
+                className={`font-semibold ${
+                  health.variant === 'success'
+                    ? 'text-success'
+                    : health.variant === 'danger'
+                      ? 'text-danger'
+                      : health.variant === 'warning'
+                        ? 'text-amber'
+                        : 'text-secondary'
+                }`}
+              >
+                {health.label}
+              </div>
             </div>
           </div>
         </div>
@@ -305,6 +342,21 @@ export const ProjectOverviewView: React.FC<ProjectOverviewViewProps> = ({ projec
         </div>
       </div>
 
+      {/* Delete Project Modal */}
+      <DeleteProjectModal
+        isOpen={isDeleteModalOpen}
+        project={project}
+        onClose={() => setIsDeleteModalOpen(false)}
+        onDelete={async (id) => {
+          if (onDeleteProject) {
+            return onDeleteProject(id);
+          }
+          return defaultDeleteProject(id);
+        }}
+        onSuccess={() => {
+          onNavigate('#/dashboard');
+        }}
+      />
     </div>
   );
 };

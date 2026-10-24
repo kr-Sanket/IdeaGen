@@ -22,9 +22,10 @@ import type {
   RunLogsResponse,
   ProjectRecord,
   ProjectCreateRequest,
+  ProjectDeleteResponse,
   BackendHealth,
   SystemStatus,
-} from '../types';
+} from '../types.ts';
 
 const API_BASE = '/api/v1';
 
@@ -317,6 +318,17 @@ export const api = {
   /** Creates a project; idempotent for an existing ID (the stored project is returned unchanged). */
   async createProject(body: ProjectCreateRequest): Promise<ProjectRecord> {
     return postJson<ProjectRecord>(`${API_BASE}/projects`, body);
+  },
+
+  /**
+   * Permanently deletes a project and all project-owned data (runs, gaps, opportunities,
+   * selections, paper links) from the server. Shared literature and underlying papers are preserved.
+   */
+  async deleteProject(projectId: string): Promise<ProjectDeleteResponse> {
+    const res = await request(`${API_BASE}/projects/${encodeURIComponent(projectId)}`, {
+      method: 'DELETE',
+    });
+    return handleResponse<ProjectDeleteResponse>(res);
   },
 
   // ── Phase 3: Project Selections, Preflight & Run Execution ─────────────

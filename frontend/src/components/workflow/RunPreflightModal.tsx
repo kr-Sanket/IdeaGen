@@ -361,8 +361,7 @@ export const RunPreflightModal: React.FC<RunPreflightModalProps> = ({
                 ) : (
                   <div
                     style={{
-                      maxHeight: '220px',
-                      overflowY: 'auto',
+                      overflowX: 'auto',
                       border: '1px solid var(--border-subtle)',
                       borderRadius: 'var(--radius-md)',
                       background: 'var(--bg-app)',

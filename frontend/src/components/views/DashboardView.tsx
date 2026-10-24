@@ -10,20 +10,32 @@ import {
   Layers,
   Clock,
   CheckCircle2,
-  Play
+  Play,
+  Trash2,
 } from 'lucide-react';
-import type { ResearchProject, WorkspaceStats, OpportunitySummary, PaperItem, ProjectRecord, ResearchRun } from '../../types';
+import type {
+  ResearchProject,
+  WorkspaceStats,
+  OpportunitySummary,
+  PaperItem,
+  ProjectRecord,
+  ResearchRun,
+  ProjectDeleteResponse,
+} from '../../types';
 import { api } from '../../api/client';
+import { deleteProject as defaultDeleteProject } from '../../projects/projectStore';
 import { LoadingState } from '../common/LoadingState';
 import { ErrorBanner } from '../common/ErrorBanner';
 import { CreateProjectModal } from './CreateProjectModal';
 import { NewRunModal } from './NewRunModal';
+import { DeleteProjectModal } from './DeleteProjectModal';
 
 interface DashboardViewProps {
   projects: ResearchProject[];
   activeProjectId: string;
   onSelectProject: (projectId: string) => void;
   onCreateProject: (params: { name: string; topic: string; description?: string; temporalCutoff?: string }) => Promise<ResearchProject>;
+  onDeleteProject?: (projectId: string) => Promise<ProjectDeleteResponse>;
   onNavigate: (route: string) => void;
 }
 
@@ -43,6 +55,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   activeProjectId,
   onSelectProject,
   onCreateProject,
+  onDeleteProject,
   onNavigate,
 }) => {
   const [stats, setStats] = useState<WorkspaceStats | null>(null);
@@ -56,6 +69,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const [isCreateModalOpen, setIsCreateModalOpen] = useState<boolean>(false);
   const [isRunModalOpen, setIsRunModalOpen] = useState<boolean>(false);
   const [runModalProject, setRunModalProject] = useState<ResearchProject | null>(null);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState<boolean>(false);
+  const [projectToDelete, setProjectToDelete] = useState<ResearchProject | null>(null);
+  const [successNotification, setSuccessNotification] = useState<string | null>(null);
 
   const projectIdsKey = projects.map((p) => p.id).join('|');
 
@@ -191,6 +207,34 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
       </div>
 
+      {successNotification && (
+        <div
+          className="callout callout-info animate-fade-in"
+          style={{
+            marginBottom: '1rem',
+            background: 'var(--emerald-light, rgba(16, 185, 129, 0.08))',
+            borderColor: 'var(--emerald-border, rgba(16, 185, 129, 0.25))',
+          }}
+          role="status"
+        >
+          <div className="callout-icon-col" style={{ color: 'var(--emerald-accent, #059669)' }}>
+            <CheckCircle2 size={16} />
+          </div>
+          <div className="callout-content" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: '0.875rem', color: 'var(--text-primary)' }}>{successNotification}</span>
+            <button
+              type="button"
+              className="btn-icon"
+              style={{ padding: '0.25rem', border: 'none', background: 'transparent', cursor: 'pointer' }}
+              onClick={() => setSuccessNotification(null)}
+              aria-label="Dismiss notification"
+            >
+              <span style={{ fontSize: '1.2rem', lineHeight: 1, color: 'var(--text-secondary)' }}>&times;</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {error && (
         <ErrorBanner
           title="Could Not Refresh Workspace Stats"
@@ -313,6 +357,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <div
                 key={proj.id}
                 className={`project-card ${isActive ? 'is-active-project' : ''}`}
+                onClick={() => onSelectProject(proj.id)}
+                role="button"
+                tabIndex={0}
+                aria-pressed={isActive}
+                aria-label={`Select project ${proj.name}`}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    onSelectProject(proj.id);
+                  }
+                }}
               >
                 {/* Card Header */}
                 <div className="project-card-header">
@@ -393,7 +448,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   <button
                     type="button"
                     className="btn btn-primary"
-                    onClick={() => handleOpenProject(proj.id)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleOpenProject(proj.id);
+                    }}
                     style={{ flex: 1 }}
                   >
                     <span>Open Project</span>
@@ -403,12 +461,32 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   <button
                     type="button"
                     className="btn btn-secondary"
-                    onClick={() => handleOpenRunModal(proj)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleOpenRunModal(proj);
+                    }}
                     title="Initiate research run for this project"
                   >
                     <Play size={14} />
                     <span>New Run</span>
                   </button>
+
+                  {!isBenchmark && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-icon"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setProjectToDelete(proj);
+                        setIsDeleteModalOpen(true);
+                      }}
+                      title={`Delete project "${proj.name}"`}
+                      aria-label={`Delete project ${proj.name}`}
+                      style={{ color: 'var(--rose-accent)' }}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  )}
                 </div>
               </div>
             );
@@ -518,6 +596,30 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           }}
           project={runModalProject}
           onNavigate={onNavigate}
+        />
+      )}
+
+      {/* Delete Project Modal */}
+      {projectToDelete && (
+        <DeleteProjectModal
+          isOpen={isDeleteModalOpen}
+          project={projectToDelete}
+          onClose={() => {
+            setIsDeleteModalOpen(false);
+            setProjectToDelete(null);
+          }}
+          onDelete={async (id) => {
+            if (onDeleteProject) {
+              return onDeleteProject(id);
+            }
+            return defaultDeleteProject(id);
+          }}
+          onSuccess={(response, deleted) => {
+            setSuccessNotification(
+              `Project "${deleted.name}" was permanently deleted. Removed ${response.summary.runs_deleted} run(s), ${response.summary.gaps_deleted} gap(s), and ${response.summary.research_opportunities_deleted} opportunity proposal(s). Shared literature is preserved.`
+            );
+            void loadData();
+          }}
         />
       )}
     </div>
