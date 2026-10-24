@@ -548,7 +548,12 @@ def test_discover_gaps_endpoint_accepts_cutoff_date(test_db):
     with patch("ideagen.api.main.SemanticGapDiscoveryPipeline.discover_gaps", return_value=[]) as mock_discover:
         res = client.post("/api/gaps/discover?cutoff_date=2024-06-01")
         assert res.status_code == 200
-        mock_discover.assert_called_once_with(cutoff_date="2024-06-01", paper_ids=None)
+        mock_discover.assert_called_once_with(
+            cutoff_date="2024-06-01",
+            paper_ids=None,
+            project_id=None,
+            max_candidates=None,
+        )
 
 
 def test_generate_opportunity_endpoint_respects_cutoff_date(test_db, mock_pipeline_dependencies):

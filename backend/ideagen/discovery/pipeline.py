@@ -29,6 +29,47 @@ from .validator import GapValidator
 logger = logging.getLogger(__name__)
 
 
+DEFAULT_MAX_CANDIDATES = 3
+HARD_MAX_CANDIDATES = 5
+MIN_CANDIDATES = 1
+
+
+def validate_candidate_limit(limit: object) -> int:
+    """Validates that a candidate limit is a strict integer between 1 and 5.
+
+    Rejects booleans, floats, non-integers, and integers outside [1, 5].
+    """
+    if isinstance(limit, bool):
+        raise ValueError(
+            f"max_candidates must be an integer between {MIN_CANDIDATES} and {HARD_MAX_CANDIDATES} "
+            f"(got boolean {limit!r})."
+        )
+    if isinstance(limit, float):
+        raise ValueError(
+            f"max_candidates must be an integer between {MIN_CANDIDATES} and {HARD_MAX_CANDIDATES} "
+            f"(got float {limit!r})."
+        )
+    if not isinstance(limit, int):
+        try:
+            if isinstance(limit, str) and "." in limit:
+                raise ValueError
+            val = int(limit)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"max_candidates must be an integer between {MIN_CANDIDATES} and {HARD_MAX_CANDIDATES} "
+                f"(got {limit!r})."
+            ) from exc
+    else:
+        val = limit
+
+    if val < MIN_CANDIDATES or val > HARD_MAX_CANDIDATES:
+        raise ValueError(
+            f"max_candidates must be an integer between {MIN_CANDIDATES} and {HARD_MAX_CANDIDATES} "
+            f"(got {val})."
+        )
+    return val
+
+
 class SemanticGapDiscoveryPipeline:
     """Orchestrates end-to-end semantic research gap discovery and validation."""
 
@@ -41,9 +82,16 @@ class SemanticGapDiscoveryPipeline:
         similarity_threshold: float = 0.65,
         min_supporting_evidence: int = 1,
         max_evidence_per_candidate: int = 3,
+        max_candidates: Optional[int] = None,
     ):
         self.persistence = persistence
         settings = get_settings()
+
+        if max_candidates is not None:
+            self.max_candidates = validate_candidate_limit(max_candidates)
+        else:
+            cfg_limit = getattr(settings, "discovery_max_candidates", DEFAULT_MAX_CANDIDATES)
+            self.max_candidates = validate_candidate_limit(cfg_limit)
 
         # 1. Embedding Provider
         self.embedding_provider = embedding_provider or get_default_embedding_provider()
@@ -73,6 +121,7 @@ class SemanticGapDiscoveryPipeline:
         paper_ids: Optional[Collection[uuid.UUID]] = None,
         project_id: Optional[str] = None,
         gap_metadata: Optional[Dict[str, object]] = None,
+        max_candidates: Optional[int] = None,
     ) -> List[ResearchGapResponseDTO]:
         """Executes the full semantic gap discovery pipeline across eligible research statements.
 
@@ -81,6 +130,13 @@ class SemanticGapDiscoveryPipeline:
         ``project_id`` and ``gap_metadata`` are stored with each gap as it is saved, so gaps persisted
         before a later failure still belong to their project and run.
         """
+        # Resolve effective limit: explicit argument > instance attribute > default fallback
+        effective_limit_raw = max_candidates if max_candidates is not None else getattr(self, "max_candidates", None)
+        if effective_limit_raw is None:
+            effective_limit_raw = getattr(get_settings(), "discovery_max_candidates", DEFAULT_MAX_CANDIDATES)
+
+        effective_limit = validate_candidate_limit(effective_limit_raw)
+
         from .temporal import normalize_cutoff_date, filter_statements_by_cutoff
 
         norm_cutoff = normalize_cutoff_date(cutoff_date)
@@ -151,9 +207,21 @@ class SemanticGapDiscoveryPipeline:
 
         # 5. Analyze research patterns and extract candidate gaps
         candidates = self.pattern_analyzer.analyze_clusters(clusters)
-        logger.info(f"Detected {len(candidates)} candidate gaps across clusters")
+        total_detected = len(candidates)
+        logger.info(f"Detected {total_detected} candidate gaps across clusters")
         if not candidates:
             return []
+
+        if total_detected > effective_limit:
+            logger.info(
+                f"Candidate validation capped from {total_detected} detected candidates to {effective_limit} "
+                f"candidates for LLM validation (preserving pattern analyzer ranking)"
+            )
+            candidates = candidates[:effective_limit]
+        else:
+            logger.info(
+                f"Evaluating all {total_detected} detected candidates (within effective limit of {effective_limit})"
+            )
 
         # 6. Validate candidates and enforce evidence integrity
         persisted_dtos: List[ResearchGapResponseDTO] = []

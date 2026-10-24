@@ -294,6 +294,23 @@ Decisions are recorded as established by the authoritative design specification.
 
 ---
 
+## AD-32: Production Candidate Bounding and Per-Project Concurrency Guard
+
+**Decision:** The synchronous direct research-gap discovery endpoint (`POST /api/v1/gaps/discover`) enforces a production candidate-validation limit (configured by `IDEAGEN_DISCOVERY_MAX_CANDIDATES`, defaulting to 3 candidates, with a strict hard ceiling of 5 candidates). Any limit outside `[1, 5]` fails safely at configuration/query validation time with an explicit error. Candidates extracted from pattern analysis are capped to this effective limit before model validation begins, strictly preserving the deterministic ranking order produced by cluster analysis. Furthermore, concurrent direct discovery requests for the same project are protected by a process-local non-blocking lock manager (`ProjectDiscoveryLockManager`); an overlapping request for an in-progress project immediately rejects with `HTTP 409 Conflict`. Requests targeting different projects execute independently and concurrently without serialization. Locks are deterministically released and evicted from the internal registry on completion or exception, preventing unbounded memory growth.
+
+**Context:** During Phase 5E preflight and Phase 5F reliability analysis, benchmarking demonstrated that candidate gap validation via local LLM (`qwen3:8b`) requires approximately 20 seconds per candidate. Unbounded discovery across real corpora (such as the 14 candidates detected on the 11-paper RAG benchmark) would execute for approximately 4.7 minutes, exceeding standard HTTP gateway/client read timeouts (~120s–180s). Applying a production-enforced cap of 3 (maximum 5) guarantees that synchronous discovery completes within ~60s (well below client timeout budgets). Simultaneously, preventing duplicate or overlapping discovery requests via non-blocking per-project locks stops concurrent requests from thrashing local model inference or corrupting state.
+
+**Process-Local & Workflow Scope Limitations Acknowledged:**
+- The in-memory lock (`threading.Lock`) protects concurrency across threads within a single Python process. In a multi-worker production deployment (such as multiple Gunicorn/Uvicorn worker processes), cross-process coordination would require a distributed lock (e.g., Redis or database advisory/row-level lock).
+- **Workflow-run discovery boundary**: Multi-stage research workflow discovery (`ResearchWorkflowEngine.execute_run()`) is governed by the workflow run state machine and is intentionally not covered by `ProjectDiscoveryLockManager`. Overlapping direct endpoint requests and workflow-run discovery targeting the same project are not mutually serialized in Stage 1 (deferred to future distributed/workflow coordination).
+- **Candidate cap inheritance**: Pipelines constructed within `ResearchWorkflowEngine` automatically inherit the non-bypassable candidate-validation cap (configured default of 3 candidates, hard maximum of 5) through `SemanticGapDiscoveryPipeline.__init__`.
+- **Client-visible metadata**: Public HTTP response schemas (`List[ResearchGapResponseDTO]`) remain unchanged; capping metrics (detected vs. evaluated counts) are surfaced strictly via structured backend logs.
+- **Offline testing scope**: Offline mock suites prove deterministic software wiring, error mapping, and concurrency guards; they do not establish empirical throughput or multi-candidate reliability for live local Ollama inference.
+
+**Status:** Established (2026-10-24).
+
+---
+
 ## Status Classification
 
 All decisions listed above are **AUTHORITATIVE DESIGN** — established through the project's design specification. They are not implementation artifacts.

@@ -19,6 +19,7 @@ import datetime
 import tempfile
 import threading
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -740,31 +741,88 @@ def search_statements(
 
 # ── Research Gaps Endpoints ──────────────────────────────────────────────
 
+class ProjectDiscoveryLockManager:
+    """Process-local per-project lock manager for direct gap discovery.
+
+    Prevents overlapping direct gap-discovery requests for the same project
+    (or global discovery when unassigned) from executing concurrently, while
+    allowing requests for different projects to proceed independently.
+
+    NOTE: This lock is strictly process-local (in-memory). In a multi-worker
+    production deployment (e.g. multi-process gunicorn/uvicorn), cross-worker
+    coordination would require a distributed lock (e.g. Redis or database row lock).
+    """
+
+    def __init__(self) -> None:
+        self._locks: Dict[str, threading.Lock] = {}
+        self._active_counts: Dict[str, int] = {}
+        self._guard = threading.Lock()
+
+    @contextmanager
+    def acquire(self, project_key: str):
+        with self._guard:
+            lock = self._locks.setdefault(project_key, threading.Lock())
+            self._active_counts[project_key] = self._active_counts.get(project_key, 0) + 1
+
+        acquired = lock.acquire(blocking=False)
+        if not acquired:
+            with self._guard:
+                self._active_counts[project_key] -= 1
+                if self._active_counts[project_key] <= 0:
+                    self._active_counts.pop(project_key, None)
+                    self._locks.pop(project_key, None)
+            detail = (
+                f"Gap discovery is already in progress for project '{project_key}'."
+                if project_key != "__global__"
+                else "Global gap discovery is already in progress."
+            )
+            raise HTTPException(status_code=409, detail=detail)
+
+        try:
+            yield
+        finally:
+            with self._guard:
+                lock.release()
+                self._active_counts[project_key] -= 1
+                if self._active_counts[project_key] <= 0:
+                    self._active_counts.pop(project_key, None)
+                    self._locks.pop(project_key, None)
+
+
+_discovery_lock_mgr = ProjectDiscoveryLockManager()
+
+
 @app.post("/api/v1/gaps/discover", response_model=List[ResearchGapResponseDTO])
 @app.post("/api/gaps/discover", response_model=List[ResearchGapResponseDTO])
 def discover_research_gaps(
     cutoff_date: Optional[str] = Query(None, description="Optional ISO publication cutoff date YYYY-MM-DD"),
     project_id: Optional[str] = Query(None, description="Restrict discovery to this project's corpus and assign the gaps to it"),
+    max_candidates: Optional[int] = Query(None, ge=1, le=5, description="Maximum candidate gaps to validate (1-5; defaults to configured limit)"),
     db: Session = Depends(get_db)
 ):
     """Triggers semantic gap discovery over a project's statements, or over all statements when no project is given."""
-    paper_ids = None
-    if project_id:
-        _require_project(db, project_id)
-        paper_ids = {
-            row[0] for row in db.query(ProjectPaperRecord.paper_id).filter(ProjectPaperRecord.project_id == project_id).all()
-        }
-    persistence = SQLAlchemyPersistenceLayer(db)
-    try:
-        pipeline = SemanticGapDiscoveryPipeline(persistence=persistence)
-        if project_id:
-            gaps = pipeline.discover_gaps(cutoff_date=cutoff_date, paper_ids=paper_ids, project_id=project_id)
-        else:
-            gaps = pipeline.discover_gaps(cutoff_date=cutoff_date, paper_ids=paper_ids)
-    except Exception as e:
-        logger.error(f"Gap discovery failed (project={project_id}): {e}", exc_info=True)
-        raise HTTPException(status_code=502 if _is_provider_error(e) else 500, detail=f"Discovery pipeline failed: {str(e)}")
-    return gaps
+    normalized_project_id = project_id.strip() if project_id and project_id.strip() else None
+    lock_key = normalized_project_id if normalized_project_id else "__global__"
+    with _discovery_lock_mgr.acquire(lock_key):
+        paper_ids = None
+        if normalized_project_id:
+            _require_project(db, normalized_project_id)
+            paper_ids = {
+                row[0] for row in db.query(ProjectPaperRecord.paper_id).filter(ProjectPaperRecord.project_id == normalized_project_id).all()
+            }
+        persistence = SQLAlchemyPersistenceLayer(db)
+        try:
+            pipeline = SemanticGapDiscoveryPipeline(persistence=persistence)
+            gaps = pipeline.discover_gaps(
+                cutoff_date=cutoff_date,
+                paper_ids=paper_ids,
+                project_id=normalized_project_id,
+                max_candidates=max_candidates,
+            )
+        except Exception as e:
+            logger.error(f"Gap discovery failed (project={normalized_project_id}): {e}", exc_info=True)
+            raise HTTPException(status_code=502 if _is_provider_error(e) else 500, detail=f"Discovery pipeline failed: {str(e)}")
+        return gaps
 
 
 @app.get("/api/v1/gaps", response_model=List[ResearchGapResponseDTO])

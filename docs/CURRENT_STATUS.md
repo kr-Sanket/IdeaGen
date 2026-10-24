@@ -104,6 +104,28 @@ Artifacts: `phase5e_results.json`, `run_phase5e_server.py`, `run_phase5e_client.
 - **Focused Test Suite**: 101 passed, 2 skipped (live model smoke tests skipped in offline run) across `backend/tests/test_ollama_lifecycle.py` and `backend/tests/test_ollama_provider.py`.
 - **Scope & Generalization Limits**: This run was explicitly bounded (1 candidate evaluated out of 14) and isolated in SQLite; it verifies end-to-end pipeline wiring, timeout resilience, and persistence mechanics under local Ollama. It does not establish multi-candidate throughput under full load, nor does it make general claims of universal scientific novelty for discovered gaps.
 
+### Phase 5F Stage 1: Direct endpoint hardening (2026-10-24)
+
+- **Production Candidate Bounding**:
+  - Implemented an explicit, non-bypassable candidate-validation limit for semantic gap discovery.
+  - Configurable via `IDEAGEN_DISCOVERY_MAX_CANDIDATES` with a default of **3 candidates** and a strict hard maximum of **5 candidates** (AD-32).
+  - Validation centralized via `validate_candidate_limit`: rejects booleans (`True`/`False`), floats (`3.8`), non-integers, and integers outside `[1, 5]` at Pydantic settings loading, API query parsing (HTTP 422), pipeline construction, and `discover_gaps` execution (`ValueError`).
+  - Safe fallback guarantees a finite effective limit: even if `self.max_candidates` is artificially nullified, `discover_gaps` falls back to the configured default (3) rather than allowing unbounded LLM validation.
+  - Bounding takes place prior to LLM candidate validation (`candidates = candidates[:effective_limit]`), guaranteeing that synchronous discovery requests stay well within standard gateway/socket timeouts (~60s runtime vs. ~4.7m for 14 candidates) while preserving the exact ranking order produced by cluster analysis.
+  - Candidate-cap logging explicitly reports detected vs. validated counts (`logger.info`); public response schema (`List[ResearchGapResponseDTO]`) remains untouched without breaking contract changes.
+  - Workflow engine pipelines constructed in `ResearchWorkflowEngine.execute_run()` automatically inherit the default candidate cap (3 candidates).
+- **Per-Project Concurrency Guard**:
+  - Implemented `ProjectDiscoveryLockManager` using in-memory non-blocking per-project locks (`threading.Lock`).
+  - An overlapping direct discovery request for an active project immediately returns `HTTP 409 Conflict` (`Gap discovery is already in progress for project '{project_id}'`), preventing parallel LLM thrashing and race conditions.
+  - Discovery requests for distinct projects proceed concurrently and independently without serialization.
+  - Lock release and reference-count decrement/eviction occur atomically under `_guard`, preventing registry leaks and race windows.
+  - Process-local limitation acknowledged: protection applies per Python process; distributed locking would be required for multi-worker deployments.
+  - Workflow boundary acknowledged: multi-stage workflow discovery (`ResearchWorkflowEngine`) is governed by its own run lifecycle and is not guarded by `ProjectDiscoveryLockManager`; overlapping direct discovery and workflow runs for the same project remain a known Stage 1 limitation.
+- **Offline Test Coverage**:
+  - 20 focused offline tests implemented in `backend/tests/discovery/test_endpoint_hardening.py` covering candidate limit configuration (defaults, boundary values, boolean/float rejection), non-bypassable pipeline bounding (attribute nullification fallback, order preservation), query parameter forwarding, concurrency rejection (409), independent multi-project execution, lock eviction, and error status mapping (HTTP 502 on `ProviderFailureError`).
+  - Pre-existing regression suite in `backend/tests/api/test_phase6_api.py` updated to reflect the new `discover_gaps` keyword arguments (`project_id=None, max_candidates=None`).
+  - All offline tests pass deterministically without network access, live inference, or database writes. They establish code wiring and error handling correctness, not unrestricted live Ollama throughput reliability.
+
 ---
 
 ## Not Verified / Not Executed

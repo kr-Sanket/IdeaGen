@@ -107,6 +107,51 @@ class Settings(BaseSettings):
             )
         return normalized
 
+    # ── Discovery ─────────────────────────────────────────────────────
+    # Maximum candidate gaps validated by LLM during direct discovery (default 3, hard max 5).
+    discovery_max_candidates: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        validation_alias=AliasChoices(
+            "IDEAGEN_DISCOVERY_MAX_CANDIDATES",
+            "DISCOVERY_MAX_CANDIDATES",
+        ),
+    )
+
+    @field_validator("discovery_max_candidates", mode="before")
+    @classmethod
+    def _validate_discovery_max_candidates(cls, value: object) -> int:
+        if value is None:
+            return 3
+        if isinstance(value, bool):
+            raise ValueError(
+                f"Invalid discovery_max_candidates {value!r}; expected integer between 1 and 5, got boolean."
+            )
+        if isinstance(value, float):
+            raise ValueError(
+                f"Invalid discovery_max_candidates {value!r}; expected integer between 1 and 5, got float."
+            )
+        try:
+            if isinstance(value, str):
+                trimmed = value.strip()
+                if "." in trimmed:
+                    raise ValueError
+                val = int(trimmed)
+            elif isinstance(value, int):
+                val = value
+            else:
+                raise ValueError
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid discovery_max_candidates {value!r}; expected integer between 1 and 5."
+            ) from exc
+        if val < 1 or val > 5:
+            raise ValueError(
+                f"discovery_max_candidates must be between 1 and 5 (got {val})."
+            )
+        return val
+
     # ── Paths ─────────────────────────────────────────────────────────
     project_root: Path = _PROJECT_ROOT
     data_dir: Path = _PROJECT_ROOT / "data"
