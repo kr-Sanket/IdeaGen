@@ -4233,3 +4233,104 @@ hr.section-divider {
     max-width: 100vw;
   }
 }
+
+/* ── Persistent Background Run Indicator & Notification Banner ──────────── */
+.status-run-active {
+  background: var(--primary-light, #eff6ff);
+  border: 1px solid var(--primary-border, #bfdbfe);
+  color: var(--primary, #2563eb);
+  padding: 0.25rem 0.65rem;
+  border-radius: var(--radius-full);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.run-indicator-text {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.run-indicator-label {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+
+.btn-link-action {
+  background: none;
+  border: none;
+  color: var(--primary);
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+}
+
+.btn-link-action:hover {
+  color: var(--primary-hover);
+}
+
+.run-notification-banner {
+  padding: 0.75rem 1.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: 0.8125rem;
+  border-bottom: 1px solid var(--border-subtle);
+  animation: fadeIn 0.2s ease-in-out;
+}
+
+.banner-message-group {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.banner-title {
+  font-weight: 700;
+}
+
+.banner-desc {
+  color: var(--text-secondary);
+}
+
+.banner-project-pill {
+  font-size: 0.6875rem;
+}
+
+.banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.run-notification-banner.banner-success {
+  background: #f0fdf4;
+  border-bottom-color: #bbf7d0;
+  color: #166534;
+}
+
+.run-notification-banner.banner-warning {
+  background: #fffbeb;
+  border-bottom-color: #fde68a;
+  color: #92400e;
+}
+
+.run-notification-banner.banner-danger {
+  background: #fef2f2;
+  border-bottom-color: #fecaca;
+  color: #991b1b;
+}
+
+.run-notification-banner.banner-info {
+  background: #eff6ff;
+  border-bottom-color: #bfdbfe;
+  color: #1e40af;
+}

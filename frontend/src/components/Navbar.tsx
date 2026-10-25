@@ -11,12 +11,14 @@ import {
   ChevronDown,
   Check,
   FolderPlus,
-  Play
+  Play,
+  Loader2,
 } from 'lucide-react';
 import { api } from '../api/client';
 import type { RouteName } from '../router';
 import type { BackendHealth, ResearchProject } from '../types';
 import { syncProjectsWithServer } from '../projects/projectStore';
+import { useRunMonitor } from '../workflow/runMonitor';
 
 interface NavbarProps {
   currentRoute: RouteName;
@@ -40,6 +42,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   const [backendHealth, setBackendHealth] = useState<BackendHealth | null>(null);
   const [isDropdownOpen, setIsDropdownOpen] = useState<boolean>(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const { monitoredRun, openRunProgress } = useRunMonitor();
 
   // Poll faster while the API is not healthy so recovery shows without a reload, and re-check
   // immediately when the window regains focus or the browser comes back online.
@@ -269,6 +272,40 @@ export const Navbar: React.FC<NavbarProps> = ({
               </div>
             )}
           </div>
+
+          {/* Active Background Research Run Indicator */}
+          {monitoredRun && (monitoredRun.status === 'RUNNING' || monitoredRun.status === 'PENDING') && (
+            <div
+              className="status-indicator status-run-active"
+              id="nav-active-run-indicator"
+              title={`Research run ${monitoredRun.runId} is executing for project: ${monitoredRun.projectName || monitoredRun.projectId}`}
+            >
+              <Loader2 size={13} className="spin text-primary" />
+              <div className="run-indicator-text">
+                <span className="run-indicator-label">
+                  {monitoredRun.projectId !== activeProject.id
+                    ? `${monitoredRun.projectName ? (monitoredRun.projectName.length > 20 ? monitoredRun.projectName.slice(0, 18) + '…' : monitoredRun.projectName) : 'Other Project'}: `
+                    : ''}
+                  {monitoredRun.currentStage ? monitoredRun.currentStage : (monitoredRun.status === 'PENDING' ? 'Pending' : 'Running')}
+                </span>
+              </div>
+              <button
+                type="button"
+                className="btn-link-action"
+                onClick={() => {
+                  if (monitoredRun.projectId !== activeProject.id) {
+                    onSelectProject(monitoredRun.projectId);
+                    onNavigate(`#/projects/${monitoredRun.projectId}/overview`);
+                  }
+                  openRunProgress(monitoredRun.runId, monitoredRun.projectId);
+                }}
+                id="btn-nav-view-progress"
+                title="Open run progress monitor"
+              >
+                View Progress
+              </button>
+            </div>
+          )}
 
           {/* Backend Connectivity Status */}
           <div className="navbar-status-wrapper">

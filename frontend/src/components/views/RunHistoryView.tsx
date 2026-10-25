@@ -18,7 +18,7 @@ import { Badge } from '../common/Badge';
 import { getScreeningDecisionBadgeVariant } from '../common/badgeVariants';
 import { NotRecorded } from '../common/NotRecorded';
 import { displayValue } from '../../format';
-import { RunProgressModal } from '../workflow/RunProgressModal';
+import { openRunProgress, registerMonitoredRun, useRunMonitor } from '../../workflow/runMonitor';
 
 interface RunHistoryViewProps {
   project: ResearchProject;
@@ -33,10 +33,8 @@ export const RunHistoryView: React.FC<RunHistoryViewProps> = ({ project, onNavig
   const [projectStats, setProjectStats] = useState<WorkspaceStats | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
-
   const [projectRuns, setProjectRuns] = useState<ResearchRun[]>([]);
-  const [activeRunId, setActiveRunId] = useState<string | null>(null);
-  const [isProgressOpen, setIsProgressOpen] = useState<boolean>(false);
+  const { monitoredRun } = useRunMonitor();
 
   const fetchProjectRuns = useCallback(() => {
     if (!project?.id) return;
@@ -162,9 +160,19 @@ export const RunHistoryView: React.FC<RunHistoryViewProps> = ({ project, onNavig
                 {projectRuns.map((r) => {
                   const stagesList = r.stages && r.stages.length > 0 ? r.stages : (r.stage_progress?.stages || []);
                   const completedStages = stagesList.filter((s: any) => s.status === 'COMPLETED').length;
+                  const isActiveMonitored = monitoredRun?.runId === r.id;
                   return (
-                    <tr key={r.id}>
-                      <td className="font-mono text-primary font-semibold">{r.id}</td>
+                    <tr key={r.id} className={isActiveMonitored ? 'is-active-run-row' : undefined}>
+                      <td className="font-mono text-primary font-semibold">
+                        <div className="u-row" style={{ gap: '0.375rem', alignItems: 'center' }}>
+                          <span>{r.id}</span>
+                          {isActiveMonitored && (
+                            <span className="badge badge-primary" style={{ fontSize: '0.625rem', padding: '0.125rem 0.375rem' }}>
+                              Active
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td>
                         <span
                           className={`badge ${
@@ -197,8 +205,10 @@ export const RunHistoryView: React.FC<RunHistoryViewProps> = ({ project, onNavig
                           type="button"
                           className="btn btn-secondary btn-xs"
                           onClick={() => {
-                            setActiveRunId(r.id);
-                            setIsProgressOpen(true);
+                            if (r.status === 'RUNNING' || r.status === 'PENDING') {
+                              registerMonitoredRun(r.id, project.id, project.name);
+                            }
+                            openRunProgress(r.id, project.id);
                           }}
                         >
                           Inspect Run &amp; Logs
@@ -444,16 +454,6 @@ export const RunHistoryView: React.FC<RunHistoryViewProps> = ({ project, onNavig
             </table>
           </div>
         </div>
-      )}
-
-      {activeRunId && (
-        <RunProgressModal
-          isOpen={isProgressOpen}
-          onClose={() => setIsProgressOpen(false)}
-          runId={activeRunId}
-          projectId={project.id}
-          onNavigate={onNavigate}
-        />
       )}
     </div>
   );

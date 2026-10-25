@@ -13,6 +13,7 @@ import { api } from '../../api/client';
 import type { PreflightResponse } from '../../types';
 import { Badge } from '../common/Badge';
 import type { BadgeVariant } from '../common/badgeVariants';
+import { registerMonitoredRun } from '../../workflow/runMonitor';
 
 interface RunPreflightModalProps {
   isOpen: boolean;
@@ -74,6 +75,7 @@ export const RunPreflightModal: React.FC<RunPreflightModalProps> = ({
     setSubmitting(true);
     try {
       const run = await api.createResearchRun(projectId);
+      registerMonitoredRun(run.id, projectId, projectName);
       onStartRun(run.id);
       onClose();
     } catch (err: any) {

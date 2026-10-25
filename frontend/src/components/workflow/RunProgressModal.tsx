@@ -21,6 +21,7 @@ import { api } from '../../api/client';
 import type { ResearchRun, RunStage, RunPaper } from '../../types';
 import { Badge } from '../common/Badge';
 import type { BadgeVariant } from '../common/badgeVariants';
+import { reportRunStatus, registerMonitoredRun } from '../../workflow/runMonitor';
 
 interface RunProgressModalProps {
   isOpen: boolean;
@@ -57,6 +58,7 @@ export const RunProgressModal: React.FC<RunProgressModalProps> = ({
     try {
       const data = await api.getRunStatus(runId);
       setRun(data);
+      reportRunStatus(data);
       setError(null);
     } catch (err: any) {
       setError(err.message || 'Failed to poll run status.');
@@ -83,6 +85,7 @@ export const RunProgressModal: React.FC<RunProgressModalProps> = ({
         try {
           const data = await api.getRunStatus(runId);
           setRun(data);
+          reportRunStatus(data);
           // If still running or pending, continue polling every 2 seconds
           if (data.status === 'RUNNING' || data.status === 'PENDING') {
             schedulePoll();
@@ -109,6 +112,8 @@ export const RunProgressModal: React.FC<RunProgressModalProps> = ({
     try {
       const updatedRun = await api.retryRun(runId);
       setRun(updatedRun);
+      registerMonitoredRun(runId, projectId);
+      reportRunStatus(updatedRun);
       // Polling stopped when the run reached a terminal state; restart it for the retried run.
       setPollEpoch((n) => n + 1);
     } catch (err: any) {
