@@ -23,6 +23,7 @@ from .models import (
     StatementEvidenceDTO,
     EvidenceRole,
 )
+from .pattern_analyzer import is_background_motivation_claim
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,19 @@ BROAD_CHALLENGE_PATTERNS = [
     re.compile(r"\b(?:assumption\s+of\s+(?:independent\s+and\s+identically\s+distributed|iid)\s+data|fl\s+faces\s+challenges\s+such\s+as\s+communication\s+cost,\s+energy\s+consumption)\b", re.IGNORECASE),
 ]
 
+# Patterns describing scale/scope divergence
+SCALE_UTILITY_PATTERNS = [
+    re.compile(r"\b(?:utility-scale|grid-scale|transmission-level|transmission\s+grid|megawatt|MW)\b", re.IGNORECASE),
+]
+SCALE_RESIDENTIAL_PATTERNS = [
+    re.compile(r"\b(?:residential|microgrids?|behind-the-meter|rooftop|distribution-level|low-voltage)\b", re.IGNORECASE),
+]
+
+# Patterns identifying introductory or background sections
+INTRODUCTORY_SECTION_PATTERNS = [
+    re.compile(r"\b(?:intro|introduction|background|related\s+work|literature\s+review|overview)\b", re.IGNORECASE),
+]
+
 
 VALIDATION_PROMPT = """You are a rigorous scientific reviewer evaluating whether a proposed research gap is substantiated by empirical evidence.
 
@@ -56,18 +70,64 @@ PROVIDED EVIDENCE STATEMENTS & ORIGINAL SOURCE PASSAGES:
 
 RULES:
 1. Classify the candidate into one of four scientific categories (gap_category) and decide the validation verdict:
-   - BACKGROUND_MOTIVATION (verdict: REJECT): The candidate describes introductory rationale, standard historical motivation for established paradigms, or textbook facts (e.g. why centralized data storage creates privacy risks, motivating federated learning) rather than an open scientific question. Reject as background knowledge.
+   - BACKGROUND_MOTIVATION (verdict: REJECT): The candidate describes introductory rationale, domain importance, standard historical motivation for established paradigms, or textbook facts (e.g. why forecasting net load is required to safeguard operations, or why centralized storage creates privacy risks) rather than an open scientific question. Reject as background knowledge unless an explicit technical deficit/bottleneck is substantiated.
    - BROAD_CHALLENGE (verdict: VALID, needs_refinement: true): The candidate identifies a legitimate real-world challenge or complexity (e.g. non-IID data distribution in federated learning), but the claim is broad and requires formulating a specific sub-problem, setting, or research question. Retain as a candidate requiring refinement.
    - STUDY_LIMITATION (verdict: VALID, needs_refinement: false): The candidate describes an ordinary procedural constraint or author disclaimer of a single experimental setup (e.g. evaluation limited to a simulated environment or specific hospital cohort). Do not claim field-wide novelty without cross-paper evidence.
    - EVIDENCE_GROUNDED_GAP (verdict: VALID, needs_refinement: false): The candidate represents a concrete, plausible, unresolved scientific gap or bottleneck with direct passage-level evidentiary backing.
 2. Ground all reasoning strictly in the provided statements and their original source passages. Do not extrapolate beyond the text.
-3. Every cited statement ID in supporting_evidence_statement_ids or counter_evidence_statement_ids MUST match an ID listed in the evidence block above.
-4. If a statement's source passage is unavailable or contradicts the claimed limitation, evaluate it critically.
+3. Citations MUST select from the evidence aliases (e.g. "E1", "E2") or exact statement IDs provided in the evidence block above:
+   - A VALID verdict REQUIRES at least one supporting evidence reference in supporting_evidence_statement_ids that directly supports the candidate claim.
+   - If you cannot identify sufficient supporting evidence from the provided evidence block, you MUST NOT return VALID (return REJECT).
+   - If there are no counter-evidence statements, return counter_evidence_statement_ids as an empty list [].
+   - supporting_evidence_statement_ids and counter_evidence_statement_ids MUST be included in your output.
+   - Do NOT invent evidence aliases or statement IDs.
+4. If a statement's source passage is unavailable or contradicts the claimed limitation, evaluate it critically:
+   - Check if an introductory limitation describing prior literature was addressed by the source paper itself. If the corpus evidence does not resolve whether it was solved, set needs_refinement to true.
+   - Check scale and scope fidelity: do not extrapolate utility-scale findings to residential microgrids (or vice-versa) without evidence of transferability; set needs_refinement to true if scale diverges.
 5. Provide a non-empty confidence score between 0.0 and 1.0 representing your confidence in the verdict and classification.
 6. Output strictly conforming to the JSON schema.
 """
 
 MAX_PASSAGE_EXCERPT_CHARS = 800
+
+
+def resolve_evidence_citation(
+    raw_citation: Any,
+    alias_to_uuid: Dict[str, uuid.UUID],
+    valid_evidence_pool: Set[uuid.UUID],
+) -> Optional[uuid.UUID]:
+    """Resolves an evidence citation (alias like 'E1', '[E1]' or raw UUID) to a verified statement UUID.
+
+    Accepts only citations that map directly to statements available in the candidate's evidence pool:
+    - Stable local aliases: 'E1', 'e1', '[E1]' present in alias_to_uuid.
+    - Exact UUIDs present in valid_evidence_pool.
+
+    Returns:
+        The matching statement UUID, or None if unmapped, foreign, or invalid.
+    """
+    if raw_citation is None:
+        return None
+    raw_str = str(raw_citation).strip()
+    if not raw_str:
+        return None
+
+    cleaned = raw_str.strip("[]'\" \t\r\n")
+
+    # 1. Check alias mapping (case-insensitive)
+    if cleaned in alias_to_uuid:
+        return alias_to_uuid[cleaned]
+    if cleaned.upper() in alias_to_uuid:
+        return alias_to_uuid[cleaned.upper()]
+
+    # 2. Check exact UUID string
+    try:
+        parsed_uuid = uuid.UUID(cleaned)
+        if parsed_uuid in valid_evidence_pool:
+            return parsed_uuid
+    except (ValueError, AttributeError):
+        pass
+
+    return None
 
 
 def _resolve_passage_text(
@@ -183,9 +243,14 @@ class GapValidator:
 
         evidence_lines = []
         valid_evidence_pool: Set[uuid.UUID] = set(bounded_stmt_ids)
+        alias_to_uuid: Dict[str, uuid.UUID] = {}
         seen_passage_provenance: Dict[str, uuid.UUID] = {}
 
-        for s_id in bounded_stmt_ids:
+        for idx, s_id in enumerate(bounded_stmt_ids, start=1):
+            alias = f"E{idx}"
+            alias_to_uuid[alias] = s_id
+            alias_to_uuid[alias.lower()] = s_id
+
             s = statements_by_id[s_id]
             p_id = s.paper_id if hasattr(s, "paper_id") else s["paper_id"]
             st_type = s.statement_type if hasattr(s, "statement_type") else s["statement_type"]
@@ -204,7 +269,7 @@ class GapValidator:
                 passage_text = _resolve_passage_text(s, passages_by_id=passages_by_id)
 
             evidence_lines.append(
-                f"- [ID: {s_id} | Paper: {p_id} | Type: {st_type} | Section: {sec or 'N/A'}]\n"
+                f"- [{alias}] [ID: {s_id} | Paper: {p_id} | Type: {st_type} | Section: {sec or 'N/A'}]\n"
                 f"  Statement: \"{text}\"\n"
                 f"  Original Source Passage: {passage_text}"
             )
@@ -245,21 +310,29 @@ class GapValidator:
 
         # 3. Evidence Integrity Verification
         verified_stmt_ids: List[uuid.UUID] = []
-        for raw_id in val_result.supporting_evidence_statement_ids:
-            try:
-                parsed_id = uuid.UUID(str(raw_id).strip())
-                if parsed_id in valid_evidence_pool:
-                    if parsed_id not in verified_stmt_ids:
-                        verified_stmt_ids.append(parsed_id)
-                else:
-                    logger.warning(
-                        f"GapValidator: Cited statement ID {parsed_id} not in candidate evidence pool."
-                    )
-            except ValueError:
+        for raw_id in (val_result.supporting_evidence_statement_ids or []):
+            resolved_id = resolve_evidence_citation(
+                raw_citation=raw_id,
+                alias_to_uuid=alias_to_uuid,
+                valid_evidence_pool=valid_evidence_pool,
+            )
+            if resolved_id is not None:
+                if resolved_id not in verified_stmt_ids:
+                    verified_stmt_ids.append(resolved_id)
+            else:
                 logger.warning(
-                    f"GapValidator: Unparseable statement ID cited: {raw_id!r}"
+                    f"GapValidator: Cited statement reference {raw_id!r} could not be resolved in candidate evidence pool."
                 )
-                continue
+
+        verified_counter_stmt_ids: List[uuid.UUID] = []
+        for raw_id in (val_result.counter_evidence_statement_ids or []):
+            resolved_counter_id = resolve_evidence_citation(
+                raw_citation=raw_id,
+                alias_to_uuid=alias_to_uuid,
+                valid_evidence_pool=valid_evidence_pool,
+            )
+            if resolved_counter_id is not None and resolved_counter_id not in verified_counter_stmt_ids:
+                verified_counter_stmt_ids.append(resolved_counter_id)
 
         # Build verified paper list
         verified_paper_ids: Set[uuid.UUID] = set()
@@ -306,9 +379,8 @@ class GapValidator:
         combined_text = f"{candidate.gap_statement} {candidate.research_problem} {candidate.why_existing_work_insufficient}".lower()
 
         # Check for background paradigm motivation
-        for pat in BACKGROUND_MOTIVATION_PATTERNS:
-            if pat.search(stmt_text) or pat.search(candidate.why_existing_work_insufficient):
-                return GapCategory.BACKGROUND_MOTIVATION
+        if is_background_motivation_claim(stmt_text) or is_background_motivation_claim(candidate.why_existing_work_insufficient):
+            return GapCategory.BACKGROUND_MOTIVATION
 
         # Check for study-specific disclaimer in single-paper candidates
         if len(verified_paper_ids) <= 1:
@@ -336,6 +408,46 @@ class GapValidator:
         assigned_category = val_result.gap_category
         needs_refinement = getattr(val_result, "needs_refinement", False)
 
+        # 1. Distinct-passage analysis using passage_id
+        verified_passage_ids: Set[uuid.UUID] = set()
+        for s_id in verified_stmt_ids:
+            s = statements_by_id[s_id]
+            raw_pid = getattr(s, "passage_id", None) if hasattr(s, "passage_id") else (
+                s.get("passage_id") if isinstance(s, dict) else None
+            )
+            if raw_pid:
+                try:
+                    if isinstance(raw_pid, str):
+                        verified_passage_ids.add(uuid.UUID(raw_pid.strip()))
+                    elif isinstance(raw_pid, uuid.UUID):
+                        verified_passage_ids.add(raw_pid)
+                except (ValueError, AttributeError):
+                    pass
+
+        distinct_passage_count = len(verified_passage_ids)
+        is_same_passage_evidence = (
+            distinct_passage_count <= 1
+            and len(verified_stmt_ids) > 1
+            and len(verified_passage_ids) > 0
+        )
+
+        # 2. Check for background motivation in candidate or evidence
+        cand_problem = candidate.research_problem or candidate.gap_statement or ""
+        cand_is_bg = is_background_motivation_claim(cand_problem) or is_background_motivation_claim(candidate.gap_statement)
+
+        all_ev_is_bg = False
+        if verified_stmt_ids:
+            all_ev_is_bg = True
+            for s_id in verified_stmt_ids:
+                s = statements_by_id[s_id]
+                txt = s.statement_text if hasattr(s, "statement_text") else s.get("statement_text", "")
+                if not is_background_motivation_claim(str(txt)):
+                    all_ev_is_bg = False
+                    break
+
+        if cand_is_bg or all_ev_is_bg or candidate.signals.get("potential_background_motivation"):
+            assigned_category = GapCategory.BACKGROUND_MOTIVATION
+
         if assigned_category is None:
             assigned_category = self._infer_gap_category(
                 candidate=candidate,
@@ -344,6 +456,38 @@ class GapValidator:
                 statements_by_id=statements_by_id,
                 verified_paper_ids=verified_paper_ids,
             )
+
+        # 3. Check scale/scope divergence
+        cand_target_residential = bool(re.search(r"\bresidential\b", candidate.gap_statement, re.IGNORECASE))
+        cand_target_utility = any(pat.search(candidate.gap_statement) for pat in SCALE_UTILITY_PATTERNS)
+
+        ev_texts = []
+        for s_id in verified_stmt_ids:
+            s = statements_by_id[s_id]
+            txt = s.statement_text if hasattr(s, "statement_text") else s.get("statement_text", "")
+            ev_texts.append(str(txt))
+        combined_ev = " ".join(ev_texts).lower()
+
+        ev_has_utility = any(pat.search(combined_ev) for pat in SCALE_UTILITY_PATTERNS)
+        ev_has_residential = bool(re.search(r"\bresidential\b", combined_ev, re.IGNORECASE))
+
+        scale_divergence = None
+        if ev_has_utility and not ev_has_residential and cand_target_residential:
+            scale_divergence = "utility_scale_evidence_generalized_to_residential_scope"
+        elif ev_has_residential and not ev_has_utility and cand_target_utility:
+            scale_divergence = "residential_evidence_generalized_to_utility_scope"
+
+        # 4. Check introductory limitation from single paper
+        all_introductory = False
+        if len(verified_paper_ids) <= 1 and verified_stmt_ids:
+            all_introductory = True
+            for s_id in verified_stmt_ids:
+                s = statements_by_id[s_id]
+                sec = s.section if hasattr(s, "section") else s.get("section", "")
+                sec_str = str(sec or "").strip()
+                if not any(pat.search(sec_str) for pat in INTRODUCTORY_SECTION_PATTERNS):
+                    all_introductory = False
+                    break
 
         if val_result.verdict == ValidationVerdict.VALID:
             if not val_result.supporting_evidence_statement_ids:
@@ -391,8 +535,17 @@ class GapValidator:
         if rejection_reason_code or val_result.verdict == ValidationVerdict.REJECT or assigned_category == GapCategory.BACKGROUND_MOTIVATION:
             status = GapStatus.REJECTED
         else:
+            # Deterministic safeguards: scale divergence and single-paper introductory limitations
+            if scale_divergence:
+                status = GapStatus.CANDIDATE
+                needs_refinement = True
+                reasoning = f"{reasoning} [Scope note: Evidence evaluates utility-scale systems, while candidate claims residential microgrid scope. Retained as CANDIDATE requiring researcher refinement to establish cross-scale transferability.]"
+            elif all_introductory and len(verified_paper_ids) <= 1:
+                status = GapStatus.CANDIDATE
+                needs_refinement = True
+                reasoning = f"{reasoning} [Evidence note: Limitation is cited exclusively from introductory/related-work text of a single paper without conclusion or cross-paper corroboration. Uncertainty flagged for researcher review to verify resolution status.]"
             # Category B: Broad challenge requiring human refinement -> Retained as CANDIDATE
-            if assigned_category == GapCategory.BROAD_CHALLENGE or needs_refinement:
+            elif assigned_category == GapCategory.BROAD_CHALLENGE or needs_refinement:
                 status = GapStatus.CANDIDATE
                 needs_refinement = True
             # Category C: Single-study limitation -> Retained as CANDIDATE with single-study scope
@@ -402,7 +555,7 @@ class GapValidator:
             else:
                 status = GapStatus.VALIDATED
 
-        # Build evidence items
+        # Build evidence items with passage_id
         evidence_items: List[StatementEvidenceDTO] = []
         if status != GapStatus.REJECTED or (verified_stmt_ids and not rejection_reason_code):
             for s_id in verified_stmt_ids:
@@ -410,6 +563,19 @@ class GapValidator:
                 p_id = s.paper_id if hasattr(s, "paper_id") else s["paper_id"]
                 if isinstance(p_id, str):
                     p_id = uuid.UUID(p_id)
+
+                raw_pid = getattr(s, "passage_id", None) if hasattr(s, "passage_id") else (
+                    s.get("passage_id") if isinstance(s, dict) else None
+                )
+                passage_uuid = None
+                if raw_pid:
+                    try:
+                        if isinstance(raw_pid, str):
+                            passage_uuid = uuid.UUID(raw_pid.strip())
+                        elif isinstance(raw_pid, uuid.UUID):
+                            passage_uuid = raw_pid
+                    except (ValueError, AttributeError):
+                        passage_uuid = None
 
                 evidence_items.append(
                     StatementEvidenceDTO(
@@ -421,6 +587,7 @@ class GapValidator:
                         page_start=s.page_start if hasattr(s, "page_start") else s.get("page_start"),
                         page_end=s.page_end if hasattr(s, "page_end") else s.get("page_end"),
                         evidence_role=EvidenceRole.SUPPORTING,
+                        passage_id=passage_uuid,
                     )
                 )
 
@@ -438,7 +605,15 @@ class GapValidator:
             "model_verdict": val_result.verdict.value,
             "gap_category": assigned_category.value if assigned_category else None,
             "needs_refinement": needs_refinement,
+            "distinct_passage_count": distinct_passage_count,
+            "distinct_paper_count": len(verified_paper_ids),
         }
+        if is_same_passage_evidence:
+            metadata["single_passage_evidence"] = True
+        if scale_divergence:
+            metadata["scale_scope_divergence"] = scale_divergence
+        if all_introductory and len(verified_paper_ids) <= 1:
+            metadata["introductory_limitation_single_paper"] = True
         if assigned_category == GapCategory.STUDY_LIMITATION and len(verified_paper_ids) <= 1:
             metadata["single_study_scope"] = True
         if rejection_reason_code:

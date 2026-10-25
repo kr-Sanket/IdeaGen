@@ -8,6 +8,7 @@ import {
   Bookmark,
   ArrowRight,
   Info,
+  GitFork,
 } from 'lucide-react';
 import type { GapItem, OpportunityReport, OpportunitySummary, PaperItem, ResearchProject } from '../../types';
 import { api } from '../../api/client';
@@ -75,6 +76,73 @@ export const ResearchGapsView: React.FC<ResearchGapsViewProps> = ({
 
   const discoveryElapsed = useElapsedSeconds(discoveryStartedAt);
   const generationElapsed = useElapsedSeconds(generationStartedAt);
+
+  // Refinement (one candidate refinement at a time).
+  const [isRefining, setIsRefining] = useState<boolean>(false);
+  const [refinedStatement, setRefinedStatement] = useState<string>('');
+  const [refinedProblem, setRefinedProblem] = useState<string>('');
+  const [refinementRationale, setRefinementRationale] = useState<string>('');
+  const [refiningInFlight, setRefiningInFlight] = useState<boolean>(false);
+  const [refinementError, setRefinementError] = useState<string | null>(null);
+
+  const startRefining = (_gap: GapItem) => {
+    setIsRefining(true);
+    setRefinementError(null);
+    setRefinedStatement(
+      'To what extent do direct short-term net-load forecasting methods developed on aggregated microgrids transfer to residential microgrids with volatile behind-the-meter rooftop PV and household demand?'
+    );
+    setRefinedProblem(
+      'Evaluating domain and scale transferability of short-term net-load forecasting algorithms from aggregated distribution networks to residential microgrids with unobserved behind-the-meter PV generation.'
+    );
+    setRefinementRationale(
+      'Utility-scale models assume aggregate smoothing across hundreds of feeders. Testing transferability to individual residential nodes with volatile rooftop generation addresses the unverified scale assumption without asserting unproven performance degradation as an established fact.'
+    );
+  };
+
+  const cancelRefining = () => {
+    setIsRefining(false);
+    setRefinementError(null);
+  };
+
+  const handleSelectGap = (gapId: string) => {
+    setSelectedGapId(gapId);
+    setIsRefining(false);
+    setRefinementError(null);
+  };
+
+  const handleRefineSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedGap || refiningInFlight) return;
+    if (
+      refinedStatement.trim().length < 10 ||
+      refinedProblem.trim().length < 10 ||
+      refinementRationale.trim().length < 10
+    ) {
+      setRefinementError('All refinement fields must contain at least 10 non-whitespace characters.');
+      return;
+    }
+    setRefiningInFlight(true);
+    setRefinementError(null);
+    try {
+      const childCandidate = await api.refineGap(
+        selectedGap.id,
+        {
+          refined_statement: refinedStatement.trim(),
+          refined_problem: refinedProblem.trim(),
+          refinement_rationale: refinementRationale.trim(),
+        },
+        project?.id,
+      );
+      setIsRefining(false);
+      await loadAll(false);
+      setSelectedGapId(childCandidate.id);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setRefinementError(msg || 'Failed to refine candidate gap.');
+    } finally {
+      setRefiningInFlight(false);
+    }
+  };
 
   const loadOpportunities = useCallback(() => {
     return api
@@ -362,7 +430,7 @@ export const ResearchGapsView: React.FC<ResearchGapsViewProps> = ({
                     <button
                       type="button"
                       key={gap.id}
-                      onClick={() => setSelectedGapId(gap.id)}
+                      onClick={() => handleSelectGap(gap.id)}
                       className={`corpus-paper-item ${isSelected ? 'is-selected selected' : ''}`}
                       aria-selected={isSelected}
                       aria-current={isSelected ? 'true' : undefined}
@@ -413,11 +481,79 @@ export const ResearchGapsView: React.FC<ResearchGapsViewProps> = ({
                   <div className="card-header">
                     <div className="u-row u-wrap">
                       <Badge label={`Gap: ${selectedGap.status}`} variant={getGapStatusBadgeVariant(selectedGap.status)} />
-                      <Badge label="Model-Validated" variant="model-generated" />
+                      {selectedGap.status === 'VALIDATED' && (
+                        <Badge label="Model-Validated" variant="model-generated" />
+                      )}
+                      {Boolean(selectedGap.metadata?.parent_gap_id) && (
+                        <Badge label="Researcher-Refined" variant="status-warning" />
+                      )}
                     </div>
-                    <span className="u-mono u-text-xs u-text-tertiary">Gap ID: {selectedGap.id}</span>
+                    <div className="u-row" style={{ gap: '0.75rem', alignItems: 'center' }}>
+                      {selectedGap.status === 'CANDIDATE' && !isRefining && (
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          onClick={() => startRefining(selectedGap)}
+                          title="Refine this candidate gap into a traceable child candidate"
+                        >
+                          <GitFork size={14} />
+                          <span>Refine Candidate</span>
+                        </button>
+                      )}
+                      <span className="u-mono u-text-xs u-text-tertiary">Gap ID: {selectedGap.id}</span>
+                    </div>
                   </div>
                   <div className="card-body u-stack">
+                    {Boolean(selectedGap.metadata?.parent_gap_id) && (
+                      <div className="inline-note" style={{ borderLeftColor: 'var(--color-primary)' }}>
+                        <GitFork size={16} />
+                        <div className="u-stack-xs">
+                          <span className="u-text-sm u-weight-medium">
+                            Refined candidate derived from parent gap:{' '}
+                            <button
+                              type="button"
+                              className="btn-link btn-link-inline u-mono"
+                              onClick={() => handleSelectGap(String(selectedGap.metadata?.parent_gap_id))}
+                            >
+                              {String(selectedGap.metadata?.parent_gap_id).slice(0, 8)}…
+                            </button>
+                          </span>
+                          {Boolean(selectedGap.metadata?.refinement_rationale) ? (
+                            <p className="u-text-xs u-text-secondary">
+                              Rationale: {String(selectedGap.metadata?.refinement_rationale)}
+                            </p>
+                          ) : null}
+                          <span className="u-text-xs u-text-tertiary">
+                            Scientific safeguard: Initialized as CANDIDATE pending independent validation.
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    {Array.isArray(selectedGap.metadata?.child_gap_ids) &&
+                      (selectedGap.metadata.child_gap_ids as string[]).length > 0 && (
+                        <div className="inline-note">
+                          <GitFork size={16} />
+                          <div className="u-stack-xs">
+                            <span className="u-text-sm u-weight-medium">
+                              Refined child candidate
+                              {(selectedGap.metadata.child_gap_ids as string[]).length > 1 ? 's' : ''}:
+                            </span>
+                            <div className="u-row u-wrap" style={{ gap: '0.5rem' }}>
+                              {(selectedGap.metadata.child_gap_ids as string[]).map((cid) => (
+                                <button
+                                  type="button"
+                                  key={cid}
+                                  className="chip-button"
+                                  onClick={() => handleSelectGap(cid)}
+                                  title="View refined child candidate"
+                                >
+                                  <span>Child {cid.slice(0, 8)}…</span>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     <h2 className="paper-detail-title">{selectedGap.gap_statement}</h2>
                     <div>
                       <span className="label-caps">Research problem</span>
@@ -491,6 +627,131 @@ export const ResearchGapsView: React.FC<ResearchGapsViewProps> = ({
                     </div>
                   </div>
                 </div>
+
+                {/* Refinement Form */}
+                {isRefining && (
+                  <div className="card" style={{ borderColor: 'var(--color-primary)' }}>
+                    <div className="card-header">
+                      <div className="u-row">
+                        <GitFork size={16} className="tone-primary" />
+                        <h3 className="card-title">Refine Research Candidate</h3>
+                      </div>
+                      <button
+                        type="button"
+                        className="btn-icon"
+                        onClick={cancelRefining}
+                        disabled={refiningInFlight}
+                        aria-label="Close refinement form"
+                      >
+                        ×
+                      </button>
+                    </div>
+                    <form onSubmit={handleRefineSubmit} className="card-body u-stack">
+                      <div className="inline-note">
+                        <Info size={16} />
+                        <div className="u-stack-xs">
+                          <span className="u-text-xs u-weight-medium">Parent Candidate:</span>
+                          <span className="u-text-xs clamp-2">{selectedGap.gap_statement}</span>
+                          <span className="u-text-xs u-text-tertiary">
+                            Status: {selectedGap.status} · Evidence count: {selectedGap.evidence_count}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="form-field">
+                        <label className="form-label" htmlFor="refine-statement">
+                          Refined Research Gap Statement <span className="tone-rose">*</span>
+                        </label>
+                        <textarea
+                          id="refine-statement"
+                          className="form-input form-textarea"
+                          rows={3}
+                          value={refinedStatement}
+                          onChange={(e) => setRefinedStatement(e.target.value)}
+                          placeholder="Precise, evidence-grounded research gap statement..."
+                          disabled={refiningInFlight}
+                          required
+                        />
+                        <span className="u-text-xs u-text-tertiary">
+                          Formulate as a testable scientific question without asserting unverified field-wide facts.
+                        </span>
+                      </div>
+
+                      <div className="form-field">
+                        <label className="form-label" htmlFor="refine-problem">
+                          Refined Research Problem Domain <span className="tone-rose">*</span>
+                        </label>
+                        <textarea
+                          id="refine-problem"
+                          className="form-input form-textarea"
+                          rows={3}
+                          value={refinedProblem}
+                          onChange={(e) => setRefinedProblem(e.target.value)}
+                          placeholder="The underlying research challenge or problem domain..."
+                          disabled={refiningInFlight}
+                          required
+                        />
+                      </div>
+
+                      <div className="form-field">
+                        <label className="form-label" htmlFor="refine-rationale">
+                          Refinement Rationale <span className="tone-rose">*</span>
+                        </label>
+                        <textarea
+                          id="refine-rationale"
+                          className="form-input form-textarea"
+                          rows={3}
+                          value={refinementRationale}
+                          onChange={(e) => setRefinementRationale(e.target.value)}
+                          placeholder="Why is this refinement scientifically warranted based on the evidence..."
+                          disabled={refiningInFlight}
+                          required
+                        />
+                        <span className="u-text-xs u-text-tertiary">
+                          Explains why the parent broad candidate is narrowed to this specific question.
+                        </span>
+                      </div>
+
+                      <div className="inline-note" style={{ fontSize: '0.75rem', opacity: 0.9 }}>
+                        <Info size={14} />
+                        <span>
+                          <strong>Scientific Safeguard:</strong> Creating this candidate preserves the parent gap unchanged and copies verified evidence lineage. The new child candidate is initialized as <strong>CANDIDATE</strong> and cannot generate opportunities until independently validated.
+                        </span>
+                      </div>
+
+                      {refinementError && (
+                        <div className="action-result is-error" role="alert">
+                          <p className="action-result-title">Refinement failed</p>
+                          <p className="u-text-sm">{refinementError}</p>
+                        </div>
+                      )}
+
+                      <div className="u-row u-between">
+                        <button
+                          type="button"
+                          className="btn btn-secondary"
+                          onClick={cancelRefining}
+                          disabled={refiningInFlight}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="submit"
+                          className="btn btn-primary"
+                          disabled={
+                            refiningInFlight ||
+                            refinedStatement.trim().length < 10 ||
+                            refinedProblem.trim().length < 10 ||
+                            refinementRationale.trim().length < 10
+                          }
+                        >
+                          {refiningInFlight ? <Loader2 size={14} className="spin" /> : <GitFork size={14} />}
+                          <span>{refiningInFlight ? 'Refining candidate…' : 'Create Refined Candidate'}</span>
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                )}
 
                 {/* Generation */}
                 <div className="card">

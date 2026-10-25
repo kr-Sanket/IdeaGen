@@ -338,6 +338,13 @@ export interface GapItem {
   metadata?: Record<string, unknown> | null;
 }
 
+export interface ResearchGapRefineRequest {
+  refined_statement: string;
+  refined_problem: string;
+  refinement_rationale: string;
+  why_insufficient?: string;
+}
+
 // ── Workflow actions (POST endpoints) ───────────────────────────────────
 
 /** OpenAlexPaperResultDTO (GET /api/v1/search/openalex). */

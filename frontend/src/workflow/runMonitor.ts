@@ -7,7 +7,7 @@
  * for terminal states (AWAITING_REVIEW, COMPLETED, PARTIAL_SUCCESS, FAILED, INTERRUPTED).
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { api } from '../api/client.ts';
 import type { ResearchRun, RunStatus } from '../types.ts';
 

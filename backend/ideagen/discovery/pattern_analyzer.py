@@ -49,10 +49,43 @@ BACKGROUND_MOTIVATION_PATTERNS = [
     re.compile(r"\b(?:motivation\s+for|in\s+order\s+to\s+avoid|to\s+alleviate\s+the\s+need\s+for)\s+(?:centralized|traditional)\b", re.IGNORECASE),
 ]
 
+# Patterns describing generic importance, necessity, or purpose rationale that explain why a field exists
+GENERIC_PURPOSE_MOTIVATION_PATTERNS = [
+    re.compile(r"\b(?:is|are|was|were)\s+(?:required|essential|crucial|needed|vital|necessary|imperative)\s+to\s+(?:safeguard|ensure|achieve|enable|optimize|maintain|balance)\b", re.IGNORECASE),
+    re.compile(r"\b(?:crucial|essential|required|vital|necessary)\s+for\s+(?:the\s+)?(?:planning|stability|reliability|integration|management|operation)\s+of\b", re.IGNORECASE),
+    re.compile(r"\b(?:optimally|efficiently)\s+balance\s+(?:energy\s+)?supply\s+and\s+demand\b", re.IGNORECASE),
+    re.compile(r"\b(?:growing|increasing)\s+integration\s+of\s+variable\s+(?:renewable|solar|wind)\s+(?:energy\s+sources|generation)\s+poses\s+new\s+challenges\b", re.IGNORECASE),
+]
+
 # Patterns describing narrow single-study experimental setups or author disclaimers
 STUDY_SPECIFIC_DISCLAIMER_PATTERNS = [
     re.compile(r"\b(?:simulated\s+environment|simulation\s+(?:setting|framework|data)|limited\s+to\s+a\s+simulated|real-world\s+hospital\s+data,\s+which\s+may\s+not\s+fully\s+represent|single\s+hospital\s+data|specific\s+hospital\s+data|cohort\s+size\s+is\s+limited)\b", re.IGNORECASE),
 ]
+
+
+def is_background_motivation_claim(text: str) -> bool:
+    """Detects whether a claim represents introductory background motivation or domain rationale.
+
+    Protects against false positives: if the text ALSO expresses an explicit empirical deficit,
+    constraint, or technical failure (via DEFICIT_OR_CONSTRAINT_PATTERNS), it is NOT rejected as
+    pure background motivation.
+    """
+    if not text or not text.strip():
+        return False
+
+    has_bg_pattern = any(pat.search(text) for pat in BACKGROUND_MOTIVATION_PATTERNS) or any(
+        pat.search(text) for pat in GENERIC_PURPOSE_MOTIVATION_PATTERNS
+    )
+    if not has_bg_pattern:
+        return False
+
+    # False-positive guard: If it describes a genuine deficit/bottleneck/constraint,
+    # it is a technical claim, not pure background motivation.
+    has_deficit = any(pat.search(text) for pat in DEFICIT_OR_CONSTRAINT_PATTERNS)
+    if has_deficit:
+        return False
+
+    return True
 
 
 def is_eligible_limitation(text: str) -> bool:
@@ -151,6 +184,7 @@ class ResearchPatternAnalyzer:
 
         supporting_stmt_ids: List[uuid.UUID] = []
         supporting_paper_ids: Set[uuid.UUID] = set()
+        supporting_passage_ids: Set[uuid.UUID] = set()
 
         for s in supporting_stmts:
             s_id = s.id if hasattr(s, "id") else s["id"]
@@ -162,6 +196,21 @@ class ResearchPatternAnalyzer:
             if isinstance(p_id, str):
                 p_id = uuid.UUID(p_id)
             supporting_paper_ids.add(p_id)
+
+            raw_pid = getattr(s, "passage_id", None) if hasattr(s, "passage_id") else (
+                s.get("passage_id") if isinstance(s, dict) else None
+            )
+            if raw_pid:
+                try:
+                    if isinstance(raw_pid, str):
+                        supporting_passage_ids.add(uuid.UUID(raw_pid.strip()))
+                    elif isinstance(raw_pid, uuid.UUID):
+                        supporting_passage_ids.add(raw_pid)
+                except (ValueError, AttributeError):
+                    pass
+
+        distinct_passages = len(supporting_passage_ids)
+        is_same_passage = (distinct_passages <= 1 and len(supporting_stmts) > 1 and len(supporting_passage_ids) > 0)
 
         # Synthesize problem description from problem statements or cluster context
         if problems:
@@ -185,21 +234,35 @@ class ResearchPatternAnalyzer:
 
         if has_limitations and has_future_work:
             pattern_type = "LIMITATION_AND_FUTURE_WORK"
-            gap_stmt = (
-                f"Unresolved methodological limitation and open research direction: {lim_0_clean}. "
-                f"Proposed future direction remains unaddressed: {fw_0_clean}."
-            )
             distinct_papers = len(supporting_paper_ids)
             if distinct_papers > 1:
+                gap_stmt = (
+                    f"Unresolved methodological limitation and open research direction: {lim_0_clean}. "
+                    f"Proposed future direction remains unaddressed: {fw_0_clean}."
+                )
                 why_insufficient = (
                     f"Existing approaches demonstrate documented constraints ({lim_0_clean}), "
                     f"while subsequent work explicitly designates this problem for future investigation without resolution."
                 )
             else:
-                why_insufficient = (
-                    f"Current work demonstrates documented constraints ({lim_0_clean}), "
-                    f"while explicitly designating this problem for future investigation without resolution."
-                )
+                if is_same_passage:
+                    gap_stmt = (
+                        f"Documented limitation and proposed direction from single source passage: {lim_0_clean}. "
+                        f"Proposed direction: {fw_0_clean}."
+                    )
+                    why_insufficient = (
+                        f"Current work demonstrates documented constraints ({lim_0_clean}), "
+                        f"while noting this problem for exploration ({fw_0_clean}) within the same source passage."
+                    )
+                else:
+                    gap_stmt = (
+                        f"Documented scientific limitation and open direction within single study: {lim_0_clean}. "
+                        f"Proposed direction: {fw_0_clean}."
+                    )
+                    why_insufficient = (
+                        f"Current work demonstrates documented constraints ({lim_0_clean}), "
+                        f"while explicitly designating this problem for future investigation without resolution."
+                    )
         elif has_limitations:
             distinct_papers = len(supporting_paper_ids)
             if distinct_papers > 1:
@@ -215,15 +278,18 @@ class ResearchPatternAnalyzer:
             gap_stmt = f"Unexplored research direction identified across scientific literature: {fw_0_clean}."
             why_insufficient = f"Prior work highlights this challenge as an open milestone, but no verified method has resolved it within the analyzed evidence."
         else:
-            pattern_type = "UNRESOLVED_PROBLEM"
-            gap_stmt = f"Identified research problem lacking comprehensive empirical resolution: {primary_clean}."
-            why_insufficient = f"The underlying research question is recognized, yet experimental verification remains partial."
+            has_deficit = any(pat.search(primary_problem) for pat in DEFICIT_OR_CONSTRAINT_PATTERNS)
+            if has_deficit:
+                pattern_type = "UNRESOLVED_PROBLEM"
+                gap_stmt = f"Identified research problem with documented constraints: {primary_clean}."
+                why_insufficient = f"The underlying research question involves documented technical bottlenecks ({primary_clean}), requiring empirical resolution."
+            else:
+                pattern_type = "UNRESOLVED_PROBLEM"
+                gap_stmt = f"Identified research question from literature: {primary_clean}."
+                why_insufficient = f"The literature describes this research objective ({primary_clean}), but empirical validation remains to be established."
 
         # Detect potential background motivation and study-specific constraint signals
-        is_bg_motivation = (
-            any(pat.search(primary_problem) for pat in BACKGROUND_MOTIVATION_PATTERNS)
-            if primary_problem else False
-        )
+        is_bg_motivation = is_background_motivation_claim(primary_problem)
         is_study_specific = (
             any(pat.search(lim_0_clean) for pat in STUDY_SPECIFIC_DISCLAIMER_PATTERNS)
             if (len(supporting_paper_ids) <= 1 and lim_0_clean) else False
@@ -235,12 +301,15 @@ class ResearchPatternAnalyzer:
             why_existing_work_insufficient=why_insufficient,
             supporting_statement_ids=supporting_stmt_ids,
             supporting_paper_ids=list(supporting_paper_ids),
+            supporting_passage_ids=list(supporting_passage_ids),
             relevant_limitations=lim_texts,
             relevant_future_work=fw_texts,
             signals={
                 "pattern_type": pattern_type,
                 "cluster_size": len(statements),
                 "contributing_paper_count": len(supporting_paper_ids),
+                "distinct_passage_count": distinct_passages,
+                "same_passage_evidence": is_same_passage,
                 "limitation_count": len(limitations),
                 "future_work_count": len(future_works),
                 "assumption_count": len(assumptions),

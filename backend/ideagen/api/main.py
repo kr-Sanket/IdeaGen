@@ -101,7 +101,12 @@ from ideagen.ingestion.openalex_ingestion import (
 from ideagen.ingestion.parser import PaperNormalizer
 from ideagen.core.config import get_settings
 from ideagen.understanding import PaperUnderstandingPipeline, ResearchKnowledgeResponseDTO
-from ideagen.discovery import SemanticGapDiscoveryPipeline, ResearchGapResponseDTO, GapStatus
+from ideagen.discovery import (
+    SemanticGapDiscoveryPipeline,
+    ResearchGapResponseDTO,
+    ResearchGapRefineRequestDTO,
+    GapStatus,
+)
 from ideagen.discovery.vector_index import StatementVectorIndex
 from ideagen.discovery.embeddings import get_default_embedding_provider
 from ideagen.llm import get_default_llm_provider
@@ -886,7 +891,185 @@ def get_research_gap(
     )
 
 
+@app.post("/api/v1/gaps/{gap_id}/refine", response_model=ResearchGapResponseDTO)
+@app.post("/api/gaps/{gap_id}/refine", response_model=ResearchGapResponseDTO)
+def refine_research_gap(
+    gap_id: uuid.UUID,
+    payload: ResearchGapRefineRequestDTO,
+    project_id: Optional[str] = Query(None, description="Optional project ID to enforce scoping"),
+    db: Session = Depends(get_db),
+):
+    """Refines an eligible candidate research gap into a new, traceable child candidate record."""
+    persistence = SQLAlchemyPersistenceLayer(db)
+    parent_gap = persistence.get_research_gap(gap_id)
+    if not parent_gap:
+        raise HTTPException(status_code=404, detail=f"Research gap {gap_id} not found.")
+
+    if _outside_project(parent_gap.project_id, project_id):
+        raise HTTPException(status_code=404, detail=f"Research gap {gap_id} not found in project {project_id}.")
+
+    if parent_gap.status == "REJECTED":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot refine a REJECTED research gap (gap {gap_id}).",
+        )
+
+    if parent_gap.status != GapStatus.CANDIDATE.value:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Only CANDIDATE research gaps are eligible for refinement (current status: {parent_gap.status}).",
+        )
+
+    target_project_id = parent_gap.project_id or (project_id.strip() if project_id and project_id.strip() else None)
+    lock = _project_run_lock(target_project_id) if target_project_id else nullcontext()
+
+    with lock:
+        # Revalidate under lock
+        parent_gap = persistence.get_research_gap(gap_id)
+        if not parent_gap:
+            raise HTTPException(status_code=404, detail=f"Research gap {gap_id} not found.")
+        if _outside_project(parent_gap.project_id, project_id):
+            raise HTTPException(status_code=404, detail=f"Research gap {gap_id} not found in project {project_id}.")
+        if parent_gap.status != GapStatus.CANDIDATE.value:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Only CANDIDATE research gaps are eligible for refinement (current status: {parent_gap.status}).",
+            )
+
+        # Idempotency / Duplicate check: look for an existing child gap under this parent
+        # with matching refined statement in the same project
+        existing_gaps = (
+            db.query(ResearchGap)
+            .filter(
+                ResearchGap.project_id == parent_gap.project_id,
+                ResearchGap.gap_statement == payload.refined_statement.strip(),
+            )
+            .all()
+        )
+        for eg in existing_gaps:
+            eg_meta = eg.metadata_json or {}
+            if eg_meta.get("parent_gap_id") == str(parent_gap.id):
+                # Duplicate submission: return existing child record idempotently
+                evidence_records = persistence.get_gap_evidence(eg.id)
+                stmt_ids = [e.statement_id for e in evidence_records]
+                paper_ids = list({e.paper_id for e in evidence_records})
+                return ResearchGapResponseDTO(
+                    id=eg.id,
+                    gap_statement=eg.gap_statement,
+                    research_problem=eg.research_problem,
+                    status=GapStatus(eg.status),
+                    evidence_count=eg.evidence_count,
+                    supporting_statement_ids=stmt_ids,
+                    supporting_paper_ids=paper_ids,
+                    limitations=eg.limitations or [],
+                    future_work=eg.future_work or [],
+                    validation_reasoning=eg.validation_reasoning,
+                    validation_confidence=eg.validation_confidence,
+                    created_at=eg.created_at,
+                    metadata=eg.metadata_json or {},
+                )
+
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        now_iso = now_utc.isoformat()
+
+        # Build child metadata preserving parent context and lineage
+        child_metadata = dict(parent_gap.metadata_json or {})
+        child_metadata.update({
+            "parent_gap_id": str(parent_gap.id),
+            "refinement_type": "RESEARCHER_REFINED",
+            "refinement_rationale": payload.refinement_rationale.strip(),
+            "needs_refinement": True,
+            "refined_at": now_iso,
+            "provenance": {
+                "parent_gap_id": str(parent_gap.id),
+                "source": "RESEARCHER_REFINED",
+                "timestamp": now_iso,
+                "refinement_rationale": payload.refinement_rationale.strip(),
+            },
+        })
+        if payload.why_insufficient:
+            child_metadata["why_insufficient"] = payload.why_insufficient.strip()
+
+        child_gap = ResearchGap(
+            id=uuid.uuid4(),
+            project_id=parent_gap.project_id,
+            gap_statement=payload.refined_statement.strip(),
+            research_problem=payload.refined_problem.strip(),
+            status=GapStatus.CANDIDATE.value,  # Crucial: initialized as CANDIDATE, never VALIDATED
+            evidence_count=parent_gap.evidence_count,
+            limitations=list(parent_gap.limitations or []),
+            future_work=list(parent_gap.future_work or []),
+            validation_reasoning=(
+                f"Researcher-refined candidate derived from parent gap {parent_gap.id}. "
+                f"Rationale: {payload.refinement_rationale.strip()}"
+            ),
+            validation_confidence=None,
+            metadata_json=child_metadata,
+            created_at=now_utc,
+            updated_at=now_utc,
+        )
+
+        db.add(child_gap)
+
+        # Copy verified evidence links from parent, preserving statement IDs, paper IDs, and roles
+        parent_evidence = persistence.get_gap_evidence(parent_gap.id)
+        child_evidence_records: List[GapEvidence] = []
+        stmt_ids: List[uuid.UUID] = []
+        paper_ids_set = set()
+
+        for pe in parent_evidence:
+            stmt_ids.append(pe.statement_id)
+            paper_ids_set.add(pe.paper_id)
+            ev_meta = dict(pe.metadata_json or {})
+            ev_meta.update({
+                "inherited_from_parent_gap_id": str(parent_gap.id),
+                "original_evidence_id": str(pe.id),
+                "independent_corroboration": False,
+            })
+            child_ev = GapEvidence(
+                id=uuid.uuid4(),
+                gap_id=child_gap.id,
+                statement_id=pe.statement_id,
+                paper_id=pe.paper_id,
+                evidence_role=pe.evidence_role,
+                metadata_json=ev_meta,
+                created_at=now_utc,
+            )
+            child_evidence_records.append(child_ev)
+
+        if child_evidence_records:
+            db.add_all(child_evidence_records)
+
+        # Update parent gap metadata to record child lineage
+        parent_meta = dict(parent_gap.metadata_json or {})
+        existing_children = list(parent_meta.get("child_gap_ids") or [])
+        if str(child_gap.id) not in existing_children:
+            existing_children.append(str(child_gap.id))
+        parent_meta["child_gap_ids"] = existing_children
+        parent_gap.metadata_json = parent_meta
+
+        db.commit()
+        db.refresh(child_gap)
+
+        return ResearchGapResponseDTO(
+            id=child_gap.id,
+            gap_statement=child_gap.gap_statement,
+            research_problem=child_gap.research_problem,
+            status=GapStatus(child_gap.status),
+            evidence_count=child_gap.evidence_count,
+            supporting_statement_ids=stmt_ids,
+            supporting_paper_ids=list(paper_ids_set),
+            limitations=child_gap.limitations or [],
+            future_work=child_gap.future_work or [],
+            validation_reasoning=child_gap.validation_reasoning,
+            validation_confidence=child_gap.validation_confidence,
+            created_at=child_gap.created_at,
+            metadata=child_gap.metadata_json or {},
+        )
+
+
 # ── Opportunities & Final Report Endpoints ──────────────────────────────
+
 
 
 @app.post("/api/v1/gaps/{gap_id}/opportunity", response_model=OpportunityReportDTO)

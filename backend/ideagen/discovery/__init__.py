@@ -10,6 +10,7 @@ from .models import (
     GapValidationResult,
     ResearchGapCreateDTO,
     ResearchGapResponseDTO,
+    ResearchGapRefineRequestDTO,
 )
 from .embeddings import (
     EmbeddingProvider,
@@ -35,6 +36,7 @@ __all__ = [
     "GapValidationResult",
     "ResearchGapCreateDTO",
     "ResearchGapResponseDTO",
+    "ResearchGapRefineRequestDTO",
     "EmbeddingProvider",
     "OllamaEmbeddingProvider",
     "GeminiEmbeddingProvider",

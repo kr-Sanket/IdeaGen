@@ -9,6 +9,7 @@ import type {
   EvidenceDetail,
   GapItem,
   GapStatus,
+  ResearchGapRefineRequest,
   OpenAlexSearchParams,
   OpenAlexSearchResponse,
   OpenAlexIngestResponse,
@@ -208,6 +209,14 @@ export const api = {
   async getGap(gapId: string): Promise<GapItem> {
     const res = await request(`${API_BASE}/gaps/${encodeURIComponent(gapId)}`);
     return handleResponse<GapItem>(res);
+  },
+
+  /**
+   * Refines an eligible candidate research gap into a new, traceable child candidate record.
+   */
+  async refineGap(gapId: string, payload: ResearchGapRefineRequest, projectId?: string): Promise<GapItem> {
+    const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : '';
+    return postJson<GapItem>(`${API_BASE}/gaps/${encodeURIComponent(gapId)}/refine${query}`, payload);
   },
 
   /**
