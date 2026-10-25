@@ -40,12 +40,12 @@ CRITICAL RULES:
 4. Extract approximately 3-8 high-priority research statements when supported by the text. If the passages genuinely support fewer statements, return only the well-supported statements (do not force a minimum or invent statements).
 5. Every statement in the statements list must identify the exact `passage_index` of the input passage providing direct evidence.
 6. Categorize statements accurately into:
-   - PROBLEM: Research gap, challenge, or problem addressed.
+   - PROBLEM: Specific open research problem, technical challenge, or scientific deficit actively investigated or left unresolved. Do NOT categorize standard background facts, textbook motivation, or historical rationale (e.g. why centralized computing or legacy baselines were originally created or superseded) as PROBLEM.
    - QUESTION: Research questions or hypotheses formulated.
    - METHOD: Algorithms, architectures, frameworks, or procedures proposed.
    - DATASET: Benchmarks, corpora, or data utilized or evaluated.
    - FINDING: Empirical results, performance metrics, or experimental discoveries.
-   - LIMITATION: Constraints, threats to validity, or computational limits identified.
+   - LIMITATION: Constraints, threats to validity, computational limits, or bounded experimental setups identified by the authors.
    - FUTURE_WORK: Proposed directions, unresolved questions, or next steps.
    - ASSUMPTION: Explicit assumptions made by the methodology.
    - CONTRIBUTION: Core novel contributions claimed by the authors.

@@ -20,6 +20,14 @@ class GapStatus(str, enum.Enum):
     REJECTED = "REJECTED"
 
 
+class GapCategory(str, enum.Enum):
+    """Scientific taxonomy for candidate research gaps."""
+    BACKGROUND_MOTIVATION = "BACKGROUND_MOTIVATION"  # Category A: Background motivation or established knowledge
+    BROAD_CHALLENGE = "BROAD_CHALLENGE"              # Category B: Known challenge needing specific research question
+    STUDY_LIMITATION = "STUDY_LIMITATION"            # Category C: Limitation specific to one study
+    EVIDENCE_GROUNDED_GAP = "EVIDENCE_GROUNDED_GAP"  # Category D: Concrete, plausible evidence-grounded research gap
+
+
 class ValidationVerdict(str, enum.Enum):
     """LLM validation decision for a candidate research gap."""
     VALID = "VALID"
@@ -71,6 +79,14 @@ class GapValidationResult(BaseModel):
     supporting_evidence_statement_ids: List[str] = Field(default_factory=list, description="UUIDs of verified supporting statements.")
     counter_evidence_statement_ids: List[str] = Field(default_factory=list, description="UUIDs of counter-evidence statements if any.")
     confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Confidence in the validation verdict.")
+    gap_category: Optional[GapCategory] = Field(
+        default=None,
+        description="Scientific taxonomy category: BACKGROUND_MOTIVATION (A), BROAD_CHALLENGE (B), STUDY_LIMITATION (C), or EVIDENCE_GROUNDED_GAP (D).",
+    )
+    needs_refinement: bool = Field(
+        default=False,
+        description="True if the challenge is genuine but broad, requiring human specification before opportunity generation.",
+    )
 
 
 class ResearchGapCreateDTO(BaseModel):

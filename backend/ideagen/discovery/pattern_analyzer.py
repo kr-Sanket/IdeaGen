@@ -42,6 +42,18 @@ DEFICIT_OR_CONSTRAINT_PATTERNS = [
     re.compile(r"\b(?:only\s+evaluated|restricted\s+to|does\s+not\s+scale|hallucinat\w*|noise|distractor\w*)\b", re.IGNORECASE),
 ]
 
+# Patterns describing why superseded, external, or traditional baseline paradigms were replaced
+BACKGROUND_MOTIVATION_PATTERNS = [
+    re.compile(r"\b(?:traditional|conventional|centralized|classical|standard)\s+(?:learning|methods?|approaches?|systems?|models?)\s+(?:requires?|relies?|suffers?|poses?|raises?)\b", re.IGNORECASE),
+    re.compile(r"\b(?:privacy\s+risks\s+and\s+storage\s+demands\s+of\s+centralized|storing\s+all\s+data\s+centrally)\b", re.IGNORECASE),
+    re.compile(r"\b(?:motivation\s+for|in\s+order\s+to\s+avoid|to\s+alleviate\s+the\s+need\s+for)\s+(?:centralized|traditional)\b", re.IGNORECASE),
+]
+
+# Patterns describing narrow single-study experimental setups or author disclaimers
+STUDY_SPECIFIC_DISCLAIMER_PATTERNS = [
+    re.compile(r"\b(?:simulated\s+environment|simulation\s+(?:setting|framework|data)|limited\s+to\s+a\s+simulated|real-world\s+hospital\s+data,\s+which\s+may\s+not\s+fully\s+represent|single\s+hospital\s+data|specific\s+hospital\s+data|cohort\s+size\s+is\s+limited)\b", re.IGNORECASE),
+]
+
 
 def is_eligible_limitation(text: str) -> bool:
     """Verifies that a statement genuinely describes a deficit, constraint, or limitation.
@@ -159,49 +171,63 @@ class ResearchPatternAnalyzer:
 
         # Determine gap statement based on dominant pattern
         lim_texts = [
-            (l.statement_text if hasattr(l, "statement_text") else l["statement_text"])
+            (l.statement_text if hasattr(l, "statement_text") else l["statement_text"]).strip()
             for l in limitations
         ]
         fw_texts = [
-            (f.statement_text if hasattr(f, "statement_text") else f["statement_text"])
+            (f.statement_text if hasattr(f, "statement_text") else f["statement_text"]).strip()
             for f in future_works
         ]
+
+        lim_0_clean = lim_texts[0].rstrip(".") if lim_texts else ""
+        fw_0_clean = fw_texts[0].rstrip(".") if fw_texts else ""
+        primary_clean = primary_problem.strip().rstrip(".")
 
         if has_limitations and has_future_work:
             pattern_type = "LIMITATION_AND_FUTURE_WORK"
             gap_stmt = (
-                f"Unresolved methodological limitation and open research direction: {lim_texts[0]}. "
-                f"Proposed future direction remains unaddressed: {fw_texts[0]}."
+                f"Unresolved methodological limitation and open research direction: {lim_0_clean}. "
+                f"Proposed future direction remains unaddressed: {fw_0_clean}."
             )
             distinct_papers = len(supporting_paper_ids)
             if distinct_papers > 1:
                 why_insufficient = (
-                    f"Existing approaches demonstrate documented constraints ({lim_texts[0]}), "
+                    f"Existing approaches demonstrate documented constraints ({lim_0_clean}), "
                     f"while subsequent work explicitly designates this problem for future investigation without resolution."
                 )
             else:
                 why_insufficient = (
-                    f"Current work demonstrates documented constraints ({lim_texts[0]}), "
+                    f"Current work demonstrates documented constraints ({lim_0_clean}), "
                     f"while explicitly designating this problem for future investigation without resolution."
                 )
         elif has_limitations:
             distinct_papers = len(supporting_paper_ids)
             if distinct_papers > 1:
                 pattern_type = "RECURRING_LIMITATIONS"
-                gap_stmt = f"Persistent scientific limitation across current methodologies: {lim_texts[0]}."
-                why_insufficient = f"While current methods establish baseline findings, they explicitly encounter limitations across multiple papers: {'; '.join(lim_texts[:2])}."
+                gap_stmt = f"Persistent scientific limitation across current methodologies: {lim_0_clean}."
+                why_insufficient = f"While current methods establish baseline findings, they explicitly encounter limitations across multiple papers: {'; '.join(t.rstrip('.') for t in lim_texts[:2])}."
             else:
                 pattern_type = "DOCUMENTED_LIMITATION"
-                gap_stmt = f"Documented scientific limitation in methodology: {lim_texts[0]}."
-                why_insufficient = f"Current work identifies an explicit limitation: {lim_texts[0]}."
+                gap_stmt = f"Documented scientific limitation in methodology: {lim_0_clean}."
+                why_insufficient = f"Current work identifies an explicit limitation: {lim_0_clean}."
         elif has_future_work:
             pattern_type = "OPEN_FUTURE_WORK"
-            gap_stmt = f"Unexplored research direction identified across scientific literature: {fw_texts[0]}."
+            gap_stmt = f"Unexplored research direction identified across scientific literature: {fw_0_clean}."
             why_insufficient = f"Prior work highlights this challenge as an open milestone, but no verified method has resolved it within the analyzed evidence."
         else:
             pattern_type = "UNRESOLVED_PROBLEM"
-            gap_stmt = f"Identified research problem lacking comprehensive empirical resolution: {primary_problem}."
+            gap_stmt = f"Identified research problem lacking comprehensive empirical resolution: {primary_clean}."
             why_insufficient = f"The underlying research question is recognized, yet experimental verification remains partial."
+
+        # Detect potential background motivation and study-specific constraint signals
+        is_bg_motivation = (
+            any(pat.search(primary_problem) for pat in BACKGROUND_MOTIVATION_PATTERNS)
+            if primary_problem else False
+        )
+        is_study_specific = (
+            any(pat.search(lim_0_clean) for pat in STUDY_SPECIFIC_DISCLAIMER_PATTERNS)
+            if (len(supporting_paper_ids) <= 1 and lim_0_clean) else False
+        )
 
         return GapCandidate(
             gap_statement=gap_stmt,
@@ -218,5 +244,7 @@ class ResearchPatternAnalyzer:
                 "limitation_count": len(limitations),
                 "future_work_count": len(future_works),
                 "assumption_count": len(assumptions),
+                "potential_background_motivation": is_bg_motivation,
+                "potential_study_specific_limitation": is_study_specific,
             },
         )

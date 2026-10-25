@@ -2,6 +2,7 @@
 
 from .models import (
     GapStatus,
+    GapCategory,
     ValidationVerdict,
     EvidenceRole,
     StatementEvidenceDTO,
@@ -26,6 +27,7 @@ from .temporal import normalize_cutoff_date, is_paper_eligible, filter_statement
 
 __all__ = [
     "GapStatus",
+    "GapCategory",
     "ValidationVerdict",
     "EvidenceRole",
     "StatementEvidenceDTO",
