@@ -20,7 +20,7 @@ from pathlib import Path
 import sys
 import tempfile
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pymupdf
@@ -108,7 +108,7 @@ class MockExperimentLLMProvider(LLMProvider):
         validation_reasoning: str = "Evidence verified across papers.",
         raise_on_understanding: bool = False,
         interrupt_on_understanding_call: Optional[int] = None,
-        fail_on_understanding_call: Optional[int] = None,
+        fail_on_understanding_call: Optional[Union[int, List[int], Tuple[int, ...]]] = None,
         model_name: str = "mock-experiment-qwen3:8b",
         timeout: Optional[float] = None,
         empty_statements: bool = False,
@@ -134,8 +134,12 @@ class MockExperimentLLMProvider(LLMProvider):
             self.understanding_calls += 1
             if self.interrupt_on_understanding_call == self.understanding_calls:
                 raise KeyboardInterrupt("Simulated SIGINT during paper understanding")
-            if self.fail_on_understanding_call == self.understanding_calls:
-                raise RuntimeError("Simulated transient failure on paper understanding")
+            if self.fail_on_understanding_call is not None:
+                if isinstance(self.fail_on_understanding_call, (list, tuple, set)):
+                    if self.understanding_calls in self.fail_on_understanding_call:
+                        raise RuntimeError("Simulated transient failure on paper understanding")
+                elif self.fail_on_understanding_call == self.understanding_calls:
+                    raise RuntimeError("Simulated transient failure on paper understanding")
             if self.raise_on_understanding:
                 raise RuntimeError("Simulated LLM extraction timeout")
             if self.empty_statements:
@@ -529,7 +533,7 @@ def test_skipping_successful_paper_understanding_without_llm_call(sample_pdf_cor
 def test_retrying_failed_extraction_safely(sample_pdf_corpus: Path, tmp_path: Path):
     """Verifies that previously failed paper extraction is cleanly retried without constraint violations."""
     artifacts_dir = tmp_path / "artifacts_retry_failed"
-    # LLM fails on the 1st paper understanding call, succeeds on 2nd
+    # LLM fails on paper 1, succeeds on paper 2
     llm1 = MockExperimentLLMProvider(fail_on_understanding_call=1)
     runner1 = ControlledExperimentRunner(
         llm_provider=llm1,

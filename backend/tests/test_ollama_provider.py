@@ -38,7 +38,7 @@ def test_ollama_provider_defaults():
     assert provider.model_name == "qwen3:8b"
     assert provider.timeout == 300.0
     assert provider.num_ctx == 8192
-    assert provider.num_predict == 512
+    assert provider.num_predict == 1024
 
 
 def test_ollama_provider_custom_config():
@@ -88,7 +88,7 @@ def test_ollama_generate_structured_success(mock_post):
     assert call_kwargs["json"]["think"] is False
     assert call_kwargs["json"]["options"]["temperature"] == 0.0
     assert call_kwargs["json"]["options"]["num_ctx"] == 8192
-    assert call_kwargs["json"]["options"]["num_predict"] == 512
+    assert call_kwargs["json"]["options"]["num_predict"] == 1024
 
 
 @patch("requests.post")

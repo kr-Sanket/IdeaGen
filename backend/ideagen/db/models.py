@@ -1,9 +1,9 @@
 import uuid
 from datetime import date, datetime, timezone
-from typing import Optional
+from typing import Optional, Any, Union
 import sqlalchemy
 from sqlalchemy import String, Date, Text, DateTime, Index
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, validates
 from sqlalchemy.dialects.postgresql import JSONB, ENUM
 from sqlalchemy.sql import func, text
 from ideagen.ingestion.models import SourceType
@@ -506,8 +506,17 @@ class RunPaperRecord(Base):
             kwargs["id"] = f"rp_{uuid.uuid4().hex[:12]}"
         elif not isinstance(kwargs["id"], str):
             kwargs["id"] = str(kwargs["id"])
+        if "paper_id" in kwargs and kwargs["paper_id"] is not None:
+            kwargs["paper_id"] = str(kwargs["paper_id"])
         super().__init__(**kwargs)
 
+    @validates("paper_id")
+    def _validate_paper_id(self, key: str, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, uuid.UUID):
+            return str(value)
+        return str(value)
 
     @property
     def passages_count(self) -> int:
@@ -530,8 +539,8 @@ class RunPaperRecord(Base):
         return self.paper_id
 
     @corpus_paper_id.setter
-    def corpus_paper_id(self, v: Optional[str]):
-        self.paper_id = v
+    def corpus_paper_id(self, v: Optional[Any]):
+        self.paper_id = str(v) if v is not None else None
 
     @property
     def has_pdf(self) -> bool:

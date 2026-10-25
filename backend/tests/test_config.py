@@ -55,7 +55,8 @@ class TestSettingsDefaults:
         assert settings.ollama_embedding_dimension == 768
         assert settings.ollama_timeout == 300.0
         assert settings.ollama_num_ctx == 8192
-        assert settings.ollama_num_predict == 512
+        assert settings.ollama_num_predict == 1024
+        assert settings.ollama_recovery_num_predict == 2048
         assert settings.ollama_auto_manage is True
         assert settings.ollama_idle_timeout == 60.0
         assert settings.ollama_startup_timeout == 30.0
@@ -95,6 +96,8 @@ class TestSettingsFromEnv:
         monkeypatch.setenv("IDEAGEN_OLLAMA_EMBEDDING_DIMENSION", "1024")
         monkeypatch.setenv("IDEAGEN_OLLAMA_TIMEOUT", "60.0")
         monkeypatch.setenv("IDEAGEN_OLLAMA_NUM_CTX", "16384")
+        monkeypatch.setenv("IDEAGEN_OLLAMA_NUM_PREDICT", "512")
+        monkeypatch.setenv("IDEAGEN_OLLAMA_RECOVERY_NUM_PREDICT", "1024")
         monkeypatch.setenv("IDEAGEN_OLLAMA_AUTO_MANAGE", "false")
         monkeypatch.setenv("IDEAGEN_OLLAMA_IDLE_TIMEOUT", "120.0")
         monkeypatch.setenv("IDEAGEN_OLLAMA_STARTUP_TIMEOUT", "45.0")
@@ -110,6 +113,8 @@ class TestSettingsFromEnv:
         assert settings.ollama_embedding_dimension == 1024
         assert settings.ollama_timeout == 60.0
         assert settings.ollama_num_ctx == 16384
+        assert settings.ollama_num_predict == 512
+        assert settings.ollama_recovery_num_predict == 1024
         assert settings.ollama_auto_manage is False
         assert settings.ollama_idle_timeout == 120.0
         assert settings.ollama_startup_timeout == 45.0

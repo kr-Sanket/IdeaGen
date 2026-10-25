@@ -7,7 +7,7 @@ import requests
 from pydantic import BaseModel, ValidationError
 
 from ideagen.llm.provider import LLMProvider
-from ideagen.llm.exceptions import ProviderFailureError, MalformedResponseError
+from ideagen.llm.exceptions import ProviderFailureError, ProviderConnectionError, MalformedResponseError
 from ideagen.core.network import proxy_hint
 
 if TYPE_CHECKING:
@@ -27,7 +27,7 @@ class OllamaLLMProvider(LLMProvider):
         model_name: str = "qwen3:8b",
         timeout: float = 300.0,
         num_ctx: int = 8192,
-        num_predict: Optional[int] = 512,
+        num_predict: Optional[int] = 1024,
         lifecycle_manager: Optional[OllamaLifecycleManager] = None,
     ):
         self.base_url = base_url.rstrip("/")
@@ -51,9 +51,9 @@ class OllamaLLMProvider(LLMProvider):
                 timeout=eff_timeout,
             )
         except requests.exceptions.Timeout as e:
-            raise ProviderFailureError(f"Ollama request timed out after {eff_timeout}s: {e}") from e
+            raise ProviderConnectionError(f"Ollama request timed out after {eff_timeout}s: {e}") from e
         except requests.exceptions.RequestException as e:
-            raise ProviderFailureError(
+            raise ProviderConnectionError(
                 f"Ollama connection error at {self.base_url} (model {self.model_name}): {e}.{proxy_hint(chat_url)}"
             ) from e
 
@@ -71,7 +71,15 @@ class OllamaLLMProvider(LLMProvider):
         except Exception as e:
             raise ProviderFailureError(f"Failed to parse Ollama HTTP response as JSON: {e}") from e
 
+        # Check explicit truncation from Ollama done_reason
+        done_reason = data.get("done_reason")
         raw_content = data.get("message", {}).get("content", "").strip()
+
+        if done_reason == "length":
+            raise MalformedResponseError(
+                f"Ollama generation truncated: exceeded output token budget (done_reason=length).\nRaw output: {raw_content}"
+            )
+
         if not raw_content:
             raise ProviderFailureError("Ollama returned an empty response.")
 
@@ -97,6 +105,7 @@ class OllamaLLMProvider(LLMProvider):
         prompt: str,
         response_schema: Type[T],
         timeout: Optional[float] = None,
+        num_predict: Optional[int] = None,
     ) -> T:
         """Generates a structured response validated against the provided Pydantic schema.
 
@@ -104,6 +113,7 @@ class OllamaLLMProvider(LLMProvider):
             prompt: The instruction and context prompt.
             response_schema: A Pydantic model class defining the expected output.
             timeout: Optional per-call request timeout in seconds.
+            num_predict: Optional per-call override for maximum generated output tokens.
 
         Returns:
             An instance of response_schema.
@@ -124,8 +134,9 @@ class OllamaLLMProvider(LLMProvider):
             "temperature": 0.0,
             "num_ctx": self.num_ctx,
         }
-        if self.num_predict is not None:
-            options["num_predict"] = self.num_predict
+        eff_num_predict = num_predict if num_predict is not None else self.num_predict
+        if eff_num_predict is not None:
+            options["num_predict"] = eff_num_predict
 
         payload = {
             "model": self.model_name,

@@ -33,6 +33,8 @@ class PaperUnderstandingPipeline:
         persistence: SQLAlchemyPersistenceLayer,
         provider: Optional[LLMProvider] = None,
         model_name: Optional[str] = None,
+        first_attempt_num_predict: Optional[int] = None,
+        recovery_num_predict: Optional[int] = None,
     ):
         self.persistence = persistence
 
@@ -49,6 +51,8 @@ class PaperUnderstandingPipeline:
             model_name=self.model_name,
             model_version="1.0",
             schema_version="v1.0",
+            first_attempt_num_predict=first_attempt_num_predict,
+            recovery_num_predict=recovery_num_predict,
         )
 
     def understand_paper(self, paper_id: uuid.UUID) -> ResearchKnowledgeResponseDTO:

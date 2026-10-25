@@ -14,7 +14,13 @@ class GeminiLLMProvider(LLMProvider):
         self.client = genai.Client(api_key=api_key)
         self.model_name = model_name
 
-    def generate_structured(self, prompt: str, response_schema: Type[T]) -> T:
+    def generate_structured(
+        self,
+        prompt: str,
+        response_schema: Type[T],
+        timeout: Optional[float] = None,
+        num_predict: Optional[int] = None,
+    ) -> T:
         try:
             response = self.client.models.generate_content(
                 model=self.model_name,

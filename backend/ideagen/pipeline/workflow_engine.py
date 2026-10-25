@@ -196,6 +196,35 @@ class ResearchWorkflowEngine:
             for row in db.query(ProjectPaperRecord.paper_id).filter(ProjectPaperRecord.project_id == project_id).all()
         }
 
+    @staticmethod
+    def _normalize_paper_ids(raw_id: Any) -> tuple[Optional[str], Optional[uuid.UUID]]:
+        """Normalizes an ingested paper ID into canonical (str_id, uuid_obj).
+
+        Returns:
+            (str_id, uuid_obj):
+                - str_id: String representation suitable for RunPaperRecord.paper_id.
+                - uuid_obj: uuid.UUID representation suitable for ProjectPaperRecord.paper_id,
+                  or None if raw_id is None or cannot be parsed as a valid UUID.
+        """
+        if raw_id is None:
+            return None, None
+        if isinstance(raw_id, uuid.UUID):
+            return str(raw_id), raw_id
+        if isinstance(raw_id, str):
+            cleaned = raw_id.strip()
+            if not cleaned:
+                return None, None
+            try:
+                parsed = uuid.UUID(cleaned)
+                return str(parsed), parsed
+            except (ValueError, AttributeError, TypeError):
+                return cleaned, None
+        try:
+            parsed = uuid.UUID(str(raw_id))
+            return str(parsed), parsed
+        except (ValueError, AttributeError, TypeError):
+            return str(raw_id), None
+
     def preflight_check(
         self,
         project_id: str,
@@ -610,9 +639,24 @@ class ResearchWorkflowEngine:
             if run.status == "RUNNING" and self.is_run_active(run_id):
                 raise ValueError(f"Run {run_id} is currently running.")
 
+            def _is_stage_retryable(stage_name: str, stage_dict: Any) -> bool:
+                if not isinstance(stage_dict, dict):
+                    return False
+                if stage_dict.get("status") in {"FAILED", "ERROR", "RUNNING", "PARTIAL_SUCCESS", "INTERRUPTED"}:
+                    return True
+                # If GAP_DISCOVERY was marked completed but discovered zero gaps, it is eligible for retry
+                if stage_name == "GAP_DISCOVERY":
+                    details = stage_dict.get("details")
+                    if isinstance(details, dict):
+                        gaps_count = details.get("gaps_discovered")
+                        if gaps_count == 0 and not isinstance(gaps_count, bool):
+                            return True
+                return False
+
             has_failed_papers = any(p.status in {"FAILED", "ERROR", "INTERRUPTED"} for p in run.papers)
             has_unfinished_stages = any(
                 (run.stage_states or {}).get(s, {}).get("status") not in _FINISHED_STAGE_STATUSES
+                or _is_stage_retryable(s, (run.stage_states or {}).get(s, {}))
                 for s in (run.planned_stages or [])
             )
             if run.status not in RETRYABLE_RUN_STATUSES and not has_failed_papers:
@@ -627,10 +671,10 @@ class ResearchWorkflowEngine:
                     p.error_message = None
                     p.updated_at = datetime.now(timezone.utc)
 
-            # Reset failed or running or interrupted stages
+            # Reset failed or running or interrupted stages, plus GAP_DISCOVERY if zero gaps were found
             stage_states = copy.deepcopy(run.stage_states) if run.stage_states else {}
             for s, st in stage_states.items():
-                if st.get("status") in {"FAILED", "ERROR", "RUNNING", "PARTIAL_SUCCESS", "INTERRUPTED"}:
+                if _is_stage_retryable(s, st):
                     st["status"] = "PENDING"
                     st["started_at"] = None
                     st["completed_at"] = None
@@ -752,12 +796,13 @@ class ResearchWorkflowEngine:
                 work = search_res[0].raw_metadata
                 res = ingestion_service.ingest_work(work)
 
+                paper_id_str, paper_uuid = cls._normalize_paper_ids(res.paper_id)
+
                 if res.status == "INGESTED":
-                    p.paper_id = res.paper_id
+                    p.paper_id = paper_id_str
                     p.passage_count = res.passage_count
                     p.status = "INGESTED"
-                    if res.paper_id:
-                        paper_uuid = uuid.UUID(res.paper_id)
+                    if paper_uuid:
                         existing_assoc = db.query(ProjectPaperRecord).filter(
                             (ProjectPaperRecord.project_id == run.project_id) & (ProjectPaperRecord.paper_id == paper_uuid)
                         ).first()
@@ -767,11 +812,10 @@ class ResearchWorkflowEngine:
                     ingested_count += 1
                     cls._append_log(run, "INFO", "INGESTION", f"Successfully ingested '{p.title}' with {res.passage_count} passages stored.")
                 elif res.status == "NO_PDF":
-                    p.paper_id = res.paper_id
+                    p.paper_id = paper_id_str
                     p.passage_count = 0
                     p.status = "NO_PDF"
-                    if res.paper_id:
-                        paper_uuid = uuid.UUID(res.paper_id)
+                    if paper_uuid:
                         existing_assoc = db.query(ProjectPaperRecord).filter(
                             (ProjectPaperRecord.project_id == run.project_id) & (ProjectPaperRecord.paper_id == paper_uuid)
                         ).first()
@@ -781,10 +825,9 @@ class ResearchWorkflowEngine:
                     ingested_count += 1
                     cls._append_log(run, "INFO", "INGESTION", f"Stored metadata for '{p.title}' (no open-access PDF available).")
                 elif res.status == "SKIPPED_DUPLICATE":
-                    p.paper_id = res.paper_id
+                    p.paper_id = paper_id_str
                     p.status = "SKIPPED_DUPLICATE"
-                    if res.paper_id:
-                        paper_uuid = uuid.UUID(res.paper_id)
+                    if paper_uuid:
                         existing_assoc = db.query(ProjectPaperRecord).filter(
                             (ProjectPaperRecord.project_id == run.project_id) & (ProjectPaperRecord.paper_id == paper_uuid)
                         ).first()
@@ -803,12 +846,19 @@ class ResearchWorkflowEngine:
                 db.commit()
 
             except Exception as e:
+                db.rollback()
                 p.status = "FAILED"
                 p.error_message = str(e)
+                if p.paper_id is not None:
+                    p.paper_id = str(p.paper_id)
                 p.updated_at = datetime.now(timezone.utc)
                 failed_count += 1
                 cls._append_log(run, "ERROR", "INGESTION", f"Unexpected failure ingesting '{p.title}': {e}")
-                db.commit()
+                try:
+                    db.commit()
+                except Exception as commit_err:
+                    logger.error(f"Failed committing failure status for paper '{p.title}': {commit_err}")
+                    db.rollback()
 
         stage_states["INGESTION"] = {
             "status": "COMPLETED" if failed_count == 0 else ("PARTIAL_SUCCESS" if ingested_count > 0 or skipped_count > 0 else "FAILED"),
@@ -851,13 +901,12 @@ class ResearchWorkflowEngine:
             if not p.paper_id:
                 continue
 
-            try:
-                p_uuid = uuid.UUID(p.paper_id)
-            except Exception:
+            _, p_uuid = cls._normalize_paper_ids(p.paper_id)
+            if not p_uuid:
                 continue
             processed_paper_ids.add(p_uuid)
 
-            # Reuse only a successful extraction; a recorded failure is retried below.
+            # Reuse only a successful extraction with statements; a recorded failure or empty extraction on full-text is retried
             existing_knowledge = db.query(ResearchKnowledge).filter(
                 ResearchKnowledge.paper_id == p_uuid, ResearchKnowledge.extraction_status == "SUCCESS"
             ).first()
@@ -865,13 +914,14 @@ class ResearchWorkflowEngine:
                 stmts = db.query(sqlalchemy.func.count(ResearchStatement.id)).filter(
                     ResearchStatement.knowledge_id == existing_knowledge.id
                 ).scalar() or 0
-                p.statement_count = stmts
-                p.status = "COMPLETED"
-                p.updated_at = datetime.now(timezone.utc)
-                already_extracted_count += 1
-                cls._append_log(run, "INFO", "UNDERSTANDING", f"Reusing {stmts} existing statements for '{p.title}'.")
-                db.commit()
-                continue
+                if stmts > 0:
+                    p.statement_count = stmts
+                    p.status = "COMPLETED"
+                    p.updated_at = datetime.now(timezone.utc)
+                    already_extracted_count += 1
+                    cls._append_log(run, "INFO", "UNDERSTANDING", f"Reusing {stmts} existing statements for '{p.title}'.")
+                    db.commit()
+                    continue
 
             # Skip metadata-only papers with 0 passages
             if p.passage_count == 0:
@@ -907,12 +957,15 @@ class ResearchWorkflowEngine:
 
         # Papers added to the project corpus directly (Paper Search "Add") are not run papers, but
         # they are part of the corpus gap discovery reads, so extract their statements as well.
+        # Reuse only papers with a successful extraction that actually contains statements.
         corpus_pending = (
             db.query(Paper)
             .join(ProjectPaperRecord, ProjectPaperRecord.paper_id == Paper.id)
             .filter(ProjectPaperRecord.project_id == run.project_id)
             .filter(~Paper.id.in_(
-                db.query(ResearchKnowledge.paper_id).filter(ResearchKnowledge.extraction_status == "SUCCESS")
+                db.query(ResearchKnowledge.paper_id)
+                .join(ResearchStatement, ResearchStatement.knowledge_id == ResearchKnowledge.id)
+                .filter(ResearchKnowledge.extraction_status == "SUCCESS")
             ))
             .all()
         )

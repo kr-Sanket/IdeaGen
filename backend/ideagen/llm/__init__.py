@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from ideagen.core.config import get_settings
 from .provider import LLMProvider
-from .exceptions import LLMError, ProviderFailureError, MalformedResponseError, MissingInputError
+from .exceptions import LLMError, ProviderFailureError, ProviderConnectionError, MalformedResponseError, MissingInputError
 from .ollama_provider import OllamaLLMProvider
 from .gemini_provider import GeminiLLMProvider
 from .ollama_lifecycle import (
@@ -40,6 +40,7 @@ __all__ = [
     "LLMProvider",
     "LLMError",
     "ProviderFailureError",
+    "ProviderConnectionError",
     "MalformedResponseError",
     "MissingInputError",
     "OllamaLLMProvider",

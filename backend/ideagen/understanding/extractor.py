@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Type
 import uuid
 
+from ideagen.core.config import get_settings
 from ideagen.llm.provider import LLMProvider
-from ideagen.llm.exceptions import ProviderFailureError, MalformedResponseError
+from ideagen.llm.exceptions import ProviderFailureError, ProviderConnectionError, MalformedResponseError
 from .models import (
     StructuredPaperExtractionOutput,
     ResearchKnowledgeCreateDTO,
@@ -33,10 +34,12 @@ SYSTEM_PROMPT = """You are an expert scientific paper analyzer.
 Analyze the provided excerpts of a scientific paper and extract structured research knowledge.
 
 CRITICAL RULES:
-1. Ground all extractions in the provided text. Do NOT fabricate, invent, or extrapolate information.
-2. If a field (e.g., datasets, limitations) is not mentioned in the passages, return an empty list or null.
-3. Every statement in the statements list must identify the exact `passage_index` of the passage providing evidence.
-4. Categorize statements accurately into:
+1. Ground all extractions strictly in the provided text. Do NOT fabricate, invent, or extrapolate information.
+2. Keep narrative overview fields (research_problem, methodology) concise (1-2 sentences each).
+3. Keep list overview fields (research_questions, datasets, findings, limitations, future_work) to 1-3 concise items. If not mentioned in passages, return an empty list or null.
+4. Extract approximately 3-8 high-priority research statements when supported by the text. If the passages genuinely support fewer statements, return only the well-supported statements (do not force a minimum or invent statements).
+5. Every statement in the statements list must identify the exact `passage_index` of the input passage providing direct evidence.
+6. Categorize statements accurately into:
    - PROBLEM: Research gap, challenge, or problem addressed.
    - QUESTION: Research questions or hypotheses formulated.
    - METHOD: Algorithms, architectures, frameworks, or procedures proposed.
@@ -46,6 +49,20 @@ CRITICAL RULES:
    - FUTURE_WORK: Proposed directions, unresolved questions, or next steps.
    - ASSUMPTION: Explicit assumptions made by the methodology.
    - CONTRIBUTION: Core novel contributions claimed by the authors.
+"""
+
+RECOVERY_INSTRUCTION_TRUNCATED = """--- RECOVERY INSTRUCTION ---
+The previous extraction output was truncated or malformed.
+Re-extract strictly the most critical research knowledge in a concise format:
+- Keep all overview fields to at most 1 brief sentence each.
+- Extract between 3 and 5 high-priority research statements with exact passage_index values.
+- Return strictly valid JSON adhering to the schema.
+"""
+
+RECOVERY_INSTRUCTION_EMPTY = """--- RECOVERY INSTRUCTION ---
+The previous extraction returned 0 research statements.
+Analyze the excerpts carefully to identify and extract between 3 and 5 grounded research statements
+(claims, methods, findings, problems, or limitations) with their exact passage_index values.
 """
 
 
@@ -58,11 +75,43 @@ class ScientificPaperExtractor:
         model_name: str,
         model_version: Optional[str] = None,
         schema_version: str = "v1.0",
+        first_attempt_num_predict: Optional[int] = None,
+        recovery_num_predict: Optional[int] = None,
     ):
         self.provider = provider
         self.model_name = model_name
         self.model_version = model_version
         self.schema_version = schema_version
+
+        cfg = get_settings()
+        self.first_attempt_num_predict = (
+            first_attempt_num_predict
+            if first_attempt_num_predict is not None
+            else cfg.ollama_num_predict
+        )
+        self.recovery_num_predict = (
+            recovery_num_predict
+            if recovery_num_predict is not None
+            else cfg.ollama_recovery_num_predict
+        )
+
+    def _call_provider(
+        self,
+        prompt: str,
+        response_schema: Type[StructuredPaperExtractionOutput],
+        num_predict: Optional[int] = None,
+    ) -> StructuredPaperExtractionOutput:
+        try:
+            return self.provider.generate_structured(
+                prompt=prompt,
+                response_schema=response_schema,
+                num_predict=num_predict,
+            )
+        except TypeError:
+            return self.provider.generate_structured(
+                prompt=prompt,
+                response_schema=response_schema,
+            )
 
     def extract(
         self,
@@ -72,7 +121,7 @@ class ScientificPaperExtractor:
     ) -> ResearchKnowledgeCreateDTO:
         """Extracts structured research knowledge from selected passages.
 
-        Handles model failures cleanly without fabricating fallback values.
+        Handles model failures cleanly with bounded recovery without fabricating fallback values.
         """
         if not selected_passages:
             return ResearchKnowledgeCreateDTO(
@@ -94,20 +143,82 @@ class ScientificPaperExtractor:
             f"Extract the structured research knowledge following the requested schema."
         )
 
+        raw_output: Optional[StructuredPaperExtractionOutput] = None
+        last_error: Optional[Exception] = None
+        can_retry: bool = True
+
+        # Attempt 1: Standard extraction with initial token budget (default 1024)
         try:
-            raw_output: StructuredPaperExtractionOutput = self.provider.generate_structured(
+            raw_output = self._call_provider(
                 prompt=prompt,
                 response_schema=StructuredPaperExtractionOutput,
+                num_predict=self.first_attempt_num_predict,
             )
-        except (ProviderFailureError, MalformedResponseError, Exception) as e:
-            logger.error(f"Inference error extracting knowledge for paper {paper_id}: {e}")
+        except MalformedResponseError as e:
+            logger.warning(
+                f"Initial extraction attempt for paper {paper_id} produced malformed/truncated output ({e}). "
+                "Attempting bounded recovery."
+            )
+            last_error = e
+        except ProviderConnectionError as e:
+            logger.error(
+                f"Provider connection error during extraction for paper {paper_id}: {e}. Skipping recovery."
+            )
+            last_error = e
+            can_retry = False
+        except ProviderFailureError as e:
+            msg = str(e).lower()
+            if any(term in msg for term in ("connect", "timed out", "timeout", "refused", "unreachable")):
+                logger.error(
+                    f"Provider connection/timeout failure for paper {paper_id}: {e}. Skipping recovery."
+                )
+                last_error = e
+                can_retry = False
+            else:
+                logger.warning(
+                    f"Provider failure for paper {paper_id} ({e}). Attempting bounded recovery."
+                )
+                last_error = e
+        except Exception as e:
+            logger.error(
+                f"Unexpected non-retryable error during extraction for paper {paper_id}: {e}. Skipping recovery."
+            )
+            last_error = e
+            can_retry = False
+
+        # Attempt 2: Bounded recovery if attempt 1 failed retryably or if full-text paper produced 0 statements
+        needs_empty_recovery = (
+            can_retry
+            and raw_output is not None
+            and len(raw_output.statements) == 0
+            and len(selected_passages) > 0
+        )
+        if can_retry and (raw_output is None or needs_empty_recovery):
+            recovery_instruction = RECOVERY_INSTRUCTION_EMPTY if needs_empty_recovery else RECOVERY_INSTRUCTION_TRUNCATED
+            recovery_prompt = f"{prompt}\n\n{recovery_instruction}"
+            try:
+                recovered_output: StructuredPaperExtractionOutput = self._call_provider(
+                    prompt=recovery_prompt,
+                    response_schema=StructuredPaperExtractionOutput,
+                    num_predict=self.recovery_num_predict,
+                )
+                if raw_output is None or len(recovered_output.statements) > 0:
+                    raw_output = recovered_output
+                    last_error = None
+            except Exception as rec_err:
+                logger.warning(f"Recovery extraction attempt for paper {paper_id} failed: {rec_err}")
+                if raw_output is None:
+                    last_error = rec_err
+
+        if raw_output is None:
+            logger.error(f"Inference error extracting knowledge for paper {paper_id}: {last_error}")
             return ResearchKnowledgeCreateDTO(
                 paper_id=paper_id,
                 model_name=self.model_name,
                 model_version=self.model_version,
                 extraction_schema_version=self.schema_version,
                 extraction_status=ExtractionStatus.FAILED,
-                error_message=str(e),
+                error_message=str(last_error),
             )
 
         # Build passage index lookup table
