@@ -141,22 +141,30 @@ export const EvolutionView: React.FC<EvolutionViewProps> = ({ project, onNavigat
           <div className="card u-stack-sm">
             <span className="section-title" style={{ fontSize: '1rem' }}>Active Opportunity Target:</span>
             <div className="u-row" style={{ flexWrap: 'wrap', gap: '0.5rem' }}>
-              {opportunities.map((opp) => (
-                <button
-                  key={opp.id}
-                  type="button"
-                  className={`btn ${opp.id === selectedOpp?.id ? 'btn-primary' : 'btn-secondary'} btn-sm`}
-                  onClick={() => setSelectedOppId(opp.id)}
-                  title={opp.proposed_research_direction || undefined}
-                >
-                  <Compass size={13} />
-                  <span>{opp.proposed_research_direction?.slice(0, 45) || 'Opportunity'}...</span>
-                  <Badge
-                    label={opp.lifecycle_status || 'OPEN'}
-                    variant={getLifecycleBadgeVariant(opp.lifecycle_status)}
-                  />
-                </button>
-              ))}
+              {opportunities.map((opp) => {
+                const isSelected = opp.id === selectedOpp?.id;
+                return (
+                  <button
+                    key={opp.id}
+                    type="button"
+                    className={`btn ${isSelected ? 'btn-primary is-selected selected' : 'btn-secondary'} btn-sm opp-selector-pill`}
+                    onClick={() => setSelectedOppId(opp.id)}
+                    aria-selected={isSelected}
+                    aria-pressed={isSelected}
+                    data-opportunity-id={opp.id}
+                    data-selected={isSelected ? 'true' : 'false'}
+                    title={opp.proposed_research_direction || undefined}
+                  >
+                    <Compass size={13} />
+                    <span>{opp.proposed_research_direction?.slice(0, 45) || 'Opportunity'}...</span>
+                    <Badge
+                      label={opp.lifecycle_status || 'OPEN'}
+                      variant={getLifecycleBadgeVariant(opp.lifecycle_status)}
+                    />
+                    {isSelected && <span className="opp-selected-check">✓</span>}
+                  </button>
+                );
+              })}
             </div>
 
             {selectedOpp && (

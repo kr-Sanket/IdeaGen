@@ -363,11 +363,21 @@ export const ResearchGapsView: React.FC<ResearchGapsViewProps> = ({
                       type="button"
                       key={gap.id}
                       onClick={() => setSelectedGapId(gap.id)}
-                      className={`corpus-paper-item ${isSelected ? 'selected' : ''}`}
+                      className={`corpus-paper-item ${isSelected ? 'is-selected selected' : ''}`}
+                      aria-selected={isSelected}
                       aria-current={isSelected ? 'true' : undefined}
+                      data-gap-id={gap.id}
+                      data-selected={isSelected ? 'true' : 'false'}
                     >
                       <span className="u-row u-between corpus-paper-item-head">
-                        <Badge label={String(gap.status)} variant={getGapStatusBadgeVariant(gap.status)} />
+                        <div className="u-row" style={{ gap: '0.375rem', alignItems: 'center' }}>
+                          <Badge label={String(gap.status)} variant={getGapStatusBadgeVariant(gap.status)} />
+                          {isSelected && (
+                            <span className="badge badge-primary selected-indicator-badge" style={{ fontSize: '0.625rem', padding: '0.125rem 0.375rem' }}>
+                              Selected
+                            </span>
+                          )}
+                        </div>
                         {generatingGapId === gap.id && (
                           <span className="u-row u-row-tight u-text-xs tone-indigo">
                             <Loader2 size={12} className="spin" /> Generating

@@ -1258,9 +1258,11 @@ button.stat-card {
 }
 
 .search-result-card.is-selected-card,
+.search-result-card.is-selected,
 .paper-card.selected-paper {
-  border-color: var(--primary);
-  background: #fbfdff;
+  border-color: var(--primary-border);
+  border-left: 3.5px solid var(--primary);
+  background: var(--primary-light, #eff6ff);
   box-shadow: 0 0 0 1px var(--primary-border), var(--shadow-xs);
 }
 
@@ -1367,9 +1369,10 @@ button.stat-card {
 }
 
 .corpus-paper-item {
-  padding: 0.85rem 1rem;
+  padding: 0.85rem 1rem 0.85rem calc(1rem - 2.5px);
   border-radius: var(--radius-md);
   border: 1px solid var(--border-subtle);
+  border-left: 3.5px solid transparent;
   background: #ffffff;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -1382,13 +1385,32 @@ button.stat-card {
 
 .corpus-paper-item:hover {
   border-color: var(--border-medium);
+  border-left-color: var(--border-medium);
   background: var(--bg-card-hover);
 }
 
-.corpus-paper-item.is-selected {
+.corpus-paper-item:focus-visible {
+  outline: 2px solid var(--border-focus, #2563eb);
+  outline-offset: 2px;
+}
+
+.corpus-paper-item.is-selected,
+.corpus-paper-item.selected,
+.corpus-paper-item[aria-selected="true"],
+.corpus-paper-item[aria-current="true"] {
+  border-color: var(--primary-border);
+  border-left-color: var(--primary);
+  background: var(--primary-light, #eff6ff);
+  box-shadow: 0 1px 3px rgba(37, 99, 235, 0.08), 0 0 0 1px var(--primary-border);
+}
+
+.corpus-paper-item.is-selected:hover,
+.corpus-paper-item.selected:hover,
+.corpus-paper-item[aria-selected="true"]:hover,
+.corpus-paper-item[aria-current="true"]:hover {
   border-color: var(--primary);
-  background: #f8fbff;
-  box-shadow: 0 0 0 1px var(--primary-border);
+  border-left-color: var(--primary);
+  background: #e0edff;
 }
 
 .corpus-paper-item-head {
@@ -1496,8 +1518,9 @@ button.stat-card {
 .gap-card-item {
   background: #ffffff;
   border: 1px solid var(--border-subtle);
+  border-left: 3.5px solid transparent;
   border-radius: var(--radius-lg);
-  padding: 1.25rem;
+  padding: 1.25rem 1.25rem 1.25rem calc(1.25rem - 2.5px);
   box-shadow: var(--shadow-card);
   cursor: pointer;
   transition: all 0.16s ease;
@@ -1511,13 +1534,34 @@ button.stat-card {
 
 .gap-card-item:hover {
   border-color: var(--border-medium);
+  border-left-color: var(--border-medium);
   transform: translateY(-1px);
 }
 
-.gap-card-item.active-gap {
-  border-color: var(--primary);
-  background: #f8fbff;
+.gap-card-item:focus-visible {
+  outline: 2px solid var(--border-focus, #2563eb);
+  outline-offset: 2px;
+}
+
+.gap-card-item.active-gap,
+.gap-card-item.is-selected,
+.gap-card-item.selected,
+.gap-card-item[aria-selected="true"],
+.gap-card-item[aria-current="true"] {
+  border-color: var(--primary-border);
+  border-left-color: var(--primary);
+  background: var(--primary-light, #eff6ff);
   box-shadow: 0 0 0 1px var(--primary-border), var(--shadow-sm);
+}
+
+.gap-card-item.active-gap:hover,
+.gap-card-item.is-selected:hover,
+.gap-card-item.selected:hover,
+.gap-card-item[aria-selected="true"]:hover,
+.gap-card-item[aria-current="true"]:hover {
+  border-color: var(--primary);
+  border-left-color: var(--primary);
+  background: #e0edff;
 }
 
 .gap-statement-text {
@@ -4232,6 +4276,37 @@ hr.section-divider {
   .evidence-drawer {
     max-width: 100vw;
   }
+}
+
+/* ── Selected State Helpers & Badges ───────────────────────────────────── */
+.selected-indicator-badge {
+  background: var(--primary, #2563eb);
+  color: #ffffff;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.opp-selector-pill {
+  transition: all 0.15s ease;
+}
+
+.opp-selector-pill.is-selected,
+.opp-selector-pill.selected,
+.opp-selector-pill[aria-selected="true"],
+.opp-selector-pill[aria-pressed="true"] {
+  box-shadow: 0 0 0 2px var(--bg-surface, #ffffff), 0 0 0 4px var(--primary);
+  font-weight: 700;
+}
+
+.opp-selected-check {
+  font-size: 0.75rem;
+  margin-left: 0.25rem;
+  font-weight: 800;
+}
+
+.data-table tr.is-active-run-row td,
+.data-table tr.selected td {
+  background: var(--primary-light, #eff6ff);
 }
 
 /* ── Persistent Background Run Indicator & Notification Banner ──────────── */

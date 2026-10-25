@@ -286,14 +286,24 @@ export const CorpusInspectorView: React.FC<CorpusInspectorViewProps> = ({
                     type="button"
                     key={paper.id}
                     onClick={() => handleSelectPaper(paper.id)}
-                    className={`corpus-paper-item ${isSelected ? 'selected' : ''}`}
+                    className={`corpus-paper-item ${isSelected ? 'is-selected selected' : ''}`}
+                    aria-selected={isSelected}
                     aria-current={isSelected ? 'true' : undefined}
+                    data-paper-id={paper.id}
+                    data-selected={isSelected ? 'true' : 'false'}
                   >
                     <span className="u-row u-between corpus-paper-item-head">
-                      <Badge
-                        label={getTemporalRoleLabel(paper.temporal_role)}
-                        variant={getTemporalRoleBadgeVariant(paper.temporal_role)}
-                      />
+                      <div className="u-row" style={{ gap: '0.375rem', alignItems: 'center' }}>
+                        <Badge
+                          label={getTemporalRoleLabel(paper.temporal_role)}
+                          variant={getTemporalRoleBadgeVariant(paper.temporal_role)}
+                        />
+                        {isSelected && (
+                          <span className="badge badge-primary selected-indicator-badge" style={{ fontSize: '0.625rem', padding: '0.125rem 0.375rem' }}>
+                            Selected
+                          </span>
+                        )}
+                      </div>
                       <span className="corpus-paper-date">
                         <RecordedValue value={paper.publication_date} missingLabel="No date" />
                       </span>
