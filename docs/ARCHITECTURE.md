@@ -53,14 +53,14 @@ Evaluation / dashboard
 
 | Layer | Technology | Status |
 |-------|-----------|--------|
-| Backend | Python + FastAPI | **IMPLEMENTED** (Phase 10 Demo Adapter) |
-| Database | PostgreSQL | **DESIGN** — not yet connected |
-| Vector index | FAISS (initial) | **DESIGN** — not yet implemented |
-| Whole-paper embeddings | SPECTER2 | **DESIGN** — not yet implemented |
-| Statement embeddings | Sentence-transformer style model | **DESIGN** — not yet implemented |
-| Clustering | HDBSCAN | **DESIGN** — not yet implemented |
-| LLM | Provider abstraction, initially compatible with Claude | **DESIGN** — not yet implemented |
-| Frontend | React + Vite | **IMPLEMENTED** (Phase 10 Demo UI) |
+| Backend | Python + FastAPI | **IMPLEMENTED** (Full API & experiment pipeline) |
+| Database | PostgreSQL / SQLite | **IMPLEMENTED** (PostgreSQL schema via Alembic; SQLite for isolated runs/tests) |
+| Vector index | FAISS | **IMPLEMENTED** (`backend/ideagen/discovery/vector_index.py`) |
+| Whole-paper embeddings | SPECTER2 | **DESIGN** — planned whole-paper representation option |
+| Statement embeddings | SentenceTransformer, Ollama (`nomic-embed-text`), Gemini | **IMPLEMENTED** (`backend/ideagen/discovery/embeddings.py`) |
+| Clustering | Agglomerative Clustering (scikit-learn) | **IMPLEMENTED** (Cosine distance threshold; HDBSCAN was initial proposal) |
+| LLM | Provider abstraction (Ollama `qwen3:8b`, Gemini `gemini-2.5-flash`, Claude) | **IMPLEMENTED** (`backend/ideagen/llm/`) |
+| Frontend | React 19 + Vite 8 + TypeScript | **IMPLEMENTED** (Read-only explorer UI; light-theme redesign pending) |
 | Python target | Python 3.11+ | **IMPLEMENTED** — `pyproject.toml` specifies `>=3.11` |
 
 ---
@@ -171,6 +171,25 @@ The `IdeaGenOrchestrator` orchestrates these stages into an isolated pipeline:
 
 ---
 
+## Current Architectural Scope & Limitations
+
+1. **Authentication & Multi-Tenant Isolation:**
+   - User authentication, JWT sessions, and role-based access control are **not implemented**.
+   - Multi-tenant workspaces are **not implemented**. The API exposes open endpoints (`allow_origins=["*"]`).
+   - Workspace-oriented statistics (`/api/v1/stats`) report global database aggregates, not isolated user workspace data.
+   - The frontend is an exploratory viewing interface; it does not provide user accounts or workspace management.
+
+2. **Database & Execution Environment:**
+   - PostgreSQL is the production store with 11 Alembic migrations; automated CI suites execute against SQLite (`create_all`).
+   - PostgreSQL-specific behaviors (concurrency locks, transactional savepoints) require a running PostgreSQL instance and have not been tested in SQLite-only runs.
+   - Long-running pipeline operations are synchronous; asynchronous job queues (e.g. Celery/Redis) are not implemented.
+
+3. **Empirical Evaluation Bounds:**
+   - Automated test suites verify software correctness, schema conformance, and deterministic pipeline mechanics.
+   - LLM evaluations (e.g., relationship classifier prompt v2) are exploratory prototype evaluations conducted on small datasets (e.g., $N=25$). They do not constitute evidence of broad scientific accuracy across open-domain literature.
+
+---
+
 ## Status Classification
 
 | Aspect | Classification |
@@ -180,4 +199,4 @@ The `IdeaGenOrchestrator` orchestrates these stages into an isolated pipeline:
 | Architectural principles | **AUTHORITATIVE DESIGN** |
 | RAG design principles | **AUTHORITATIVE DESIGN** |
 | "LLM classifies, code transitions" | **AUTHORITATIVE DESIGN — NON-NEGOTIABLE** |
-| Current implementation | **Phase 10 demo dashboard complete** |
+| Current implementation | **Backend pipeline & read-only explorer UI implemented** (see `docs/CURRENT_STATUS.md`) |

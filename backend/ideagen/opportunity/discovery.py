@@ -15,7 +15,7 @@ class ResearchGapSignal:
     normalized_statement: str
     source_type: str = "manual"
     confidence: float = 1.0
-    created_at: datetime.datetime = field(default_factory=datetime.datetime.utcnow)
+    created_at: datetime.datetime = field(default_factory=lambda: datetime.datetime.now(datetime.timezone.utc))
 
 @dataclass(frozen=True)
 class OpportunityCandidate:
@@ -126,9 +126,19 @@ class OpportunityDiscoveryService:
             # Form candidate fields
             shortest_sig = min(cluster_signals, key=lambda s: len(s.normalized_statement or s.statement))
             
-            title = f"Recurring Gap: {shortest_sig.normalized_statement or shortest_sig.statement}"
+            shortest_text = shortest_sig.normalized_statement or shortest_sig.statement
+            distinct_papers = len(supporting_paper_ids)
+            stmt_count = len(cluster_signals)
+            stmt_str = f"{stmt_count} similar statement" if stmt_count == 1 else f"{stmt_count} similar statements"
+
             problem_statement = " | ".join([s.statement for s in cluster_signals])
-            description = f"Discovered from {len(cluster_signals)} similar statements across {len(supporting_paper_ids)} papers."
+
+            if distinct_papers > 1:
+                title = f"Recurring Gap: {shortest_text}"
+                description = f"Discovered from {stmt_str} across {distinct_papers} papers."
+            else:
+                title = f"Documented Gap: {shortest_text}"
+                description = f"Discovered from {stmt_str} within 1 paper."
             
             # Summarize similarities within cluster
             sim_summary = {}

@@ -33,16 +33,24 @@ class LLMCandidateOpportunitySchema(BaseModel):
     required_compute: str = Field(description="Compute requirements (GPUs, memory)")
     implementation_complexity: str = Field(description="Complexity evaluation")
     experimental_setup: str = Field(description="Experimental baselines and evaluation protocol")
-    feasibility_score: float = Field(default=0.8, ge=0.0, le=1.0)
+    feasibility_score: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Feasibility score as a normalized float between 0.0 and 1.0 (minimum: 0.0, maximum: 1.0, e.g. 0.85). "
+            "Do NOT use a 1-10 scale or a percentage scale."
+        ),
+    )
     confidence: float = Field(default=0.75, ge=0.0, le=1.0)
 
 
 class OpportunityGenerator:
     """Generates grounded candidate research opportunities from validated research gaps."""
 
-    def __init__(self, llm_provider: Optional[LLMProvider] = None, model_name: str = "gemini-2.5-flash"):
+    def __init__(self, llm_provider: Optional[LLMProvider] = None, model_name: Optional[str] = None):
         self.llm_provider = llm_provider
-        self.model_name = model_name
+        self.model_name = model_name or getattr(llm_provider, "model_name", "gemini-2.5-flash")
 
     def generate_candidate(self, input_dto: ResearchOpportunityInputDTO) -> CandidateOpportunity:
         """Generates a candidate research opportunity grounded in the input evidence using LLM."""
@@ -92,7 +100,7 @@ INSTRUCTIONS:
 1. Propose a concrete research direction addressing the gap above.
 2. Ensure the proposal directly references and builds upon the provided limitations and methods.
 3. Clearly explain what should be investigated, why it addresses the gap, and what technical approach to take.
-4. Assess feasibility carefully considering data, compute, complexity, and experimental setup.
+4. Assess feasibility carefully considering data, compute, complexity, and experimental setup. Express feasibility_score as a normalized float from 0.0 to 1.0 (where 1.0 means highest feasibility; e.g., 0.85). Do NOT use a 1-10 scale or a percentage.
 5. NEVER claim absolute novelty (do NOT use terms like 'novel research idea', 'guaranteed novel', or 'first ever').
 """
 

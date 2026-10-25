@@ -1,4 +1,4 @@
-from ideagen.evaluation.schemas import EvaluationResult
+from ideagen.evaluation.schemas import EvaluationResult, EvaluationType
 
 def evaluate_temporal_leakage() -> EvaluationResult:
     """
@@ -8,6 +8,7 @@ def evaluate_temporal_leakage() -> EvaluationResult:
     return EvaluationResult(
         evaluation_name="temporal_leakage_controlled",
         fixture_version="phase_8_v1",
+        evaluation_type=EvaluationType.FIXTURE,
         model_provider=None,
         parameters={"strict_cutoff": True},
         metrics={"future_leakage_rate": 0.0, "state_transition_correctness": 1.0},

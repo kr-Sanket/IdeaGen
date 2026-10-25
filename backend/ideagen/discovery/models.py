@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 
 class GapStatus(str, enum.Enum):
@@ -18,6 +18,14 @@ class GapStatus(str, enum.Enum):
     CANDIDATE = "CANDIDATE"
     VALIDATED = "VALIDATED"
     REJECTED = "REJECTED"
+
+
+class GapCategory(str, enum.Enum):
+    """Scientific taxonomy for candidate research gaps."""
+    BACKGROUND_MOTIVATION = "BACKGROUND_MOTIVATION"  # Category A: Background motivation or established knowledge
+    BROAD_CHALLENGE = "BROAD_CHALLENGE"              # Category B: Known challenge needing specific research question
+    STUDY_LIMITATION = "STUDY_LIMITATION"            # Category C: Limitation specific to one study
+    EVIDENCE_GROUNDED_GAP = "EVIDENCE_GROUNDED_GAP"  # Category D: Concrete, plausible evidence-grounded research gap
 
 
 class ValidationVerdict(str, enum.Enum):
@@ -46,6 +54,7 @@ class StatementEvidenceDTO(BaseModel):
     page_start: Optional[int] = None
     page_end: Optional[int] = None
     evidence_role: EvidenceRole = EvidenceRole.SUPPORTING
+    passage_id: Optional[UUID] = None
 
 
 class GapCandidate(BaseModel):
@@ -57,6 +66,7 @@ class GapCandidate(BaseModel):
     why_existing_work_insufficient: str = Field(description="Explanation of why current methodologies or findings fall short.")
     supporting_statement_ids: List[UUID] = Field(default_factory=list, description="IDs of statements providing evidence.")
     supporting_paper_ids: List[UUID] = Field(default_factory=list, description="IDs of papers contributing evidence.")
+    supporting_passage_ids: List[UUID] = Field(default_factory=list, description="IDs of passages contributing evidence.")
     relevant_limitations: List[str] = Field(default_factory=list, description="Explicit limitations supporting this gap.")
     relevant_future_work: List[str] = Field(default_factory=list, description="Future work directions pointing to this gap.")
     signals: Dict[str, Any] = Field(default_factory=dict, description="Pattern signals (e.g. recurrence_count, cross_paper_evidence).")
@@ -68,9 +78,33 @@ class GapValidationResult(BaseModel):
 
     verdict: ValidationVerdict = Field(description="Whether the candidate is supported by evidence (VALID) or rejected (REJECT).")
     reasoning: str = Field(description="Detailed scientific rationale for the validation verdict.")
-    supporting_evidence_statement_ids: List[str] = Field(default_factory=list, description="UUIDs of verified supporting statements.")
-    counter_evidence_statement_ids: List[str] = Field(default_factory=list, description="UUIDs of counter-evidence statements if any.")
+    supporting_evidence_statement_ids: List[str] = Field(
+        default_factory=list,
+        description="Evidence aliases (e.g. ['E1', 'E2']) or statement UUIDs supporting the candidate. MUST be non-empty when verdict is VALID.",
+    )
+    counter_evidence_statement_ids: List[str] = Field(
+        default_factory=list,
+        description="Evidence aliases or statement UUIDs for contradictory statements, or empty list [] if none.",
+    )
     confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0, description="Confidence in the validation verdict.")
+    gap_category: Optional[GapCategory] = Field(
+        default=None,
+        description="Scientific taxonomy category: BACKGROUND_MOTIVATION (A), BROAD_CHALLENGE (B), STUDY_LIMITATION (C), or EVIDENCE_GROUNDED_GAP (D).",
+    )
+    needs_refinement: bool = Field(
+        default=False,
+        description="True if the challenge is genuine but broad, requiring human specification before opportunity generation.",
+    )
+
+    @classmethod
+    def __get_pydantic_json_schema__(cls, core_schema, handler):
+        json_schema = handler(core_schema)
+        req = json_schema.get("required", [])
+        for field in ("verdict", "reasoning", "supporting_evidence_statement_ids", "counter_evidence_statement_ids"):
+            if field not in req:
+                req.append(field)
+        json_schema["required"] = req
+        return json_schema
 
 
 class ResearchGapCreateDTO(BaseModel):
@@ -106,3 +140,22 @@ class ResearchGapResponseDTO(BaseModel):
     validation_confidence: Optional[float]
     created_at: datetime
     metadata: Dict[str, Any]
+
+
+class ResearchGapRefineRequestDTO(BaseModel):
+    """Payload for refining an existing candidate research gap into a traceable child record."""
+    model_config = ConfigDict(extra="ignore")
+
+    refined_statement: str = Field(..., description="Refined, specific research gap statement.")
+    refined_problem: str = Field(..., description="Refined formulation of the underlying research problem.")
+    refinement_rationale: str = Field(..., description="Researcher rationale for why this refinement is scientifically warranted.")
+    why_insufficient: Optional[str] = Field(default=None, description="Optional updated justification of why existing work is insufficient.")
+
+    @field_validator("refined_statement", "refined_problem", "refinement_rationale")
+    @classmethod
+    def check_non_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Field cannot be empty or whitespace only.")
+        if len(v.strip()) < 10:
+            raise ValueError("Field must contain at least 10 non-whitespace characters.")
+        return v.strip()

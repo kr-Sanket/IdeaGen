@@ -217,6 +217,37 @@ def test_passage_selector_deterministic():
     assert "Limitations" in sections_present
 
 
+def test_passage_selector_defaults_and_word_budget():
+    """Verifies PassageSelector defaults to 2500 max_total_words and enforces word budget."""
+    selector = PassageSelector()
+    assert selector.max_passages == 12
+    assert selector.max_total_words == 2500
+
+    paper_id = uuid.uuid4()
+    doc_id = uuid.uuid4()
+
+    # Create passages where each has ~600 words
+    long_text = "word " * 600
+    passages = [
+        PaperPassage(id=uuid.uuid4(), paper_id=paper_id, document_id=doc_id, passage_index=0, page_start=1, page_end=1, section="Abstract", text=long_text),
+        PaperPassage(id=uuid.uuid4(), paper_id=paper_id, document_id=doc_id, passage_index=1, page_start=2, page_end=2, section="Limitations", text=long_text),
+        PaperPassage(id=uuid.uuid4(), paper_id=paper_id, document_id=doc_id, passage_index=2, page_start=3, page_end=3, section="Conclusion", text=long_text),
+        PaperPassage(id=uuid.uuid4(), paper_id=paper_id, document_id=doc_id, passage_index=3, page_start=4, page_end=4, section="Introduction", text=long_text),
+        PaperPassage(id=uuid.uuid4(), paper_id=paper_id, document_id=doc_id, passage_index=4, page_start=5, page_end=5, section="Methods", text=long_text),
+        PaperPassage(id=uuid.uuid4(), paper_id=paper_id, document_id=doc_id, passage_index=5, page_start=6, page_end=6, section="Results", text=long_text),
+    ]
+
+    selected = selector.select_passages(passages)
+    total_words = sum(len(p.text.split()) for p in selected)
+
+    # Must stay within the 2500 word limit
+    assert total_words <= 2500
+    # Must preserve ordering by passage_index
+    assert [s.passage_index for s in selected] == sorted([s.passage_index for s in selected])
+    # Abstract must be present as highest priority
+    assert any(s.section == "Abstract" for s in selected)
+
+
 def test_passage_provenance_mapping():
     """Verifies statements map accurately to their source passage ID and page bounds."""
     paper_id = uuid.uuid4()
@@ -496,3 +527,324 @@ def test_real_model_inference_or_integration(session):
         assert stmt.statement_type in [st.value for st in StatementType]
         # Must link to either passage 0 or passage 1
         assert stmt.passage_id in [p.id for p in passages]
+
+
+# ============================================================================
+# Phase 3 Provenance Robustness Tests (Diagnostic Fix)
+# ============================================================================
+
+
+def test_provenance_valid_structured_passage_index():
+    """Requirement 1: A valid structured passage_index resolves to the correct passage."""
+    paper_id = uuid.uuid4()
+    p14_id = uuid.uuid4()
+    passages = [
+        SelectedPassage(
+            passage_id=p14_id,
+            passage_index=14,
+            page_start=4,
+            page_end=4,
+            section="Training",
+            text="Fine-tuning the query encoder BERTq and BART generator is sufficient for strong performance.",
+        ),
+    ]
+
+    provider = StubRealContractProvider(response_data={
+        "research_problem": "Efficient RAG Training",
+        "statements": [
+            {
+                "statement_text": "Fine-tuning the query encoder BERTq and BART generator is sufficient for strong performance.",
+                "statement_type": "FINDING",
+                "passage_index": 14,
+                "confidence": 0.95,
+            }
+        ]
+    })
+    extractor = ScientificPaperExtractor(provider=provider, model_name="test-structured")
+    result = extractor.extract(paper_id=paper_id, selected_passages=passages)
+
+    assert result.extraction_status == ExtractionStatus.SUCCESS
+    assert len(result.research_statements) == 1
+    stmt = result.research_statements[0]
+    assert stmt.source_passage_id == p14_id
+    assert stmt.source_page_start == 4
+    assert stmt.source_page_end == 4
+    assert stmt.section == "Training"
+    assert stmt.statement_text == "Fine-tuning the query encoder BERTq and BART generator is sufficient for strong performance."
+    assert stmt.metadata.get("model_reported_passage_index") == 14
+    assert "recovered_inline_passage_index" not in stmt.metadata
+
+
+def test_provenance_inline_trailing_passage_index_recovered():
+    """Requirement 2: An inline trailing passage_index is recovered when structured field is None."""
+    paper_id = uuid.uuid4()
+    p14_id = uuid.uuid4()
+    passages = [
+        SelectedPassage(
+            passage_id=p14_id,
+            passage_index=14,
+            page_start=4,
+            page_end=4,
+            section="Training",
+            text="Training the document encoder is not necessary.",
+        ),
+    ]
+
+    # Simulating Qwen3 diagnostic behavior: inline (passage_index: 14) and passage_index=None
+    provider = StubRealContractProvider(response_data={
+        "research_problem": "RAG Training Bottlenecks",
+        "statements": [
+            {
+                "statement_text": "Fine-tuning the query encoder BERTq and BART generator is sufficient for strong performance. (passage_index: 14)",
+                "statement_type": "LIMITATION",
+                "passage_index": None,
+                "confidence": 0.90,
+            }
+        ]
+    })
+    extractor = ScientificPaperExtractor(provider=provider, model_name="test-inline-recovery")
+    result = extractor.extract(paper_id=paper_id, selected_passages=passages)
+
+    assert result.extraction_status == ExtractionStatus.SUCCESS
+    assert len(result.research_statements) == 1
+    stmt = result.research_statements[0]
+    assert stmt.source_passage_id == p14_id
+    assert stmt.source_page_start == 4
+    assert stmt.source_page_end == 4
+    assert stmt.section == "Training"
+    assert stmt.metadata.get("model_reported_passage_index") is None
+    assert stmt.metadata.get("recovered_inline_passage_index") == 14
+
+
+def test_provenance_inline_reference_removed_from_stored_text():
+    """Requirement 3: The inline reference is removed from stored statement text."""
+    paper_id = uuid.uuid4()
+    p1_id = uuid.uuid4()
+    p2_id = uuid.uuid4()
+    passages = [
+        SelectedPassage(passage_id=p1_id, passage_index=1, page_start=1, page_end=1, section="Intro", text="Text 1"),
+        SelectedPassage(passage_id=p2_id, passage_index=2, page_start=2, page_end=2, section="Method", text="Text 2"),
+    ]
+
+    provider = StubRealContractProvider(response_data={
+        "research_problem": "Text Cleaning Test",
+        "statements": [
+            {
+                "statement_text": "First statement claim. (passage_index: 1)",
+                "statement_type": "FINDING",
+                "passage_index": None,
+            },
+            {
+                "statement_text": "Second statement claim (passage_index: 2).",
+                "statement_type": "METHOD",
+                "passage_index": None,
+            },
+            {
+                "statement_text": "Third statement bracket format [passage_index: 1]",
+                "statement_type": "PROBLEM",
+                "passage_index": None,
+            },
+        ]
+    })
+    extractor = ScientificPaperExtractor(provider=provider, model_name="test-cleaning")
+    result = extractor.extract(paper_id=paper_id, selected_passages=passages)
+
+    stmts = result.research_statements
+    assert stmts[0].statement_text == "First statement claim."
+    assert stmts[0].source_passage_id == p1_id
+
+    assert stmts[1].statement_text == "Second statement claim."
+    assert stmts[1].source_passage_id == p2_id
+
+    assert stmts[2].statement_text == "Third statement bracket format"
+    assert stmts[2].source_passage_id == p1_id
+
+
+def test_provenance_invalid_out_of_range_index_no_false_link():
+    """Requirement 4: An invalid/out-of-range passage index does not create a false link."""
+    paper_id = uuid.uuid4()
+    p1_id = uuid.uuid4()
+    passages = [
+        SelectedPassage(passage_id=p1_id, passage_index=1, page_start=1, page_end=1, section="Intro", text="Passage 1"),
+    ]
+
+    provider = StubRealContractProvider(response_data={
+        "research_problem": "Out of Range Test",
+        "statements": [
+            {
+                "statement_text": "Statement citing non-existent passage index. (passage_index: 99)",
+                "statement_type": "LIMITATION",
+                "passage_index": None,
+            },
+            {
+                "statement_text": "Statement with structured out of range index.",
+                "statement_type": "LIMITATION",
+                "passage_index": 42,
+            },
+        ]
+    })
+    extractor = ScientificPaperExtractor(provider=provider, model_name="test-out-of-range")
+    result = extractor.extract(paper_id=paper_id, selected_passages=passages)
+
+    assert len(result.research_statements) == 2
+    # Preserved, but provenance is safely None
+    assert result.research_statements[0].source_passage_id is None
+    assert result.research_statements[0].source_page_start is None
+    assert result.research_statements[0].statement_text == "Statement citing non-existent passage index."
+
+    assert result.research_statements[1].source_passage_id is None
+    assert result.research_statements[1].source_page_start is None
+
+
+def test_provenance_missing_reference_handled_safely():
+    """Requirement 5: A missing reference is handled safely without crashing or fabricating links."""
+    paper_id = uuid.uuid4()
+    p1_id = uuid.uuid4()
+    passages = [
+        SelectedPassage(passage_id=p1_id, passage_index=1, page_start=1, page_end=1, section="Intro", text="Known passage text."),
+    ]
+
+    provider = StubRealContractProvider(response_data={
+        "research_problem": "Missing Reference Test",
+        "statements": [
+            {
+                "statement_text": "Completely unreferenced general knowledge statement.",
+                "statement_type": "ASSUMPTION",
+                "passage_index": None,
+            }
+        ]
+    })
+    extractor = ScientificPaperExtractor(provider=provider, model_name="test-missing")
+    result = extractor.extract(paper_id=paper_id, selected_passages=passages)
+
+    assert result.extraction_status == ExtractionStatus.SUCCESS
+    assert len(result.research_statements) == 1
+    stmt = result.research_statements[0]
+    assert stmt.statement_text == "Completely unreferenced general knowledge statement."
+    assert stmt.source_passage_id is None
+    assert stmt.source_page_start is None
+    assert stmt.source_page_end is None
+    assert stmt.section is None
+
+
+def test_provenance_conflicting_structured_and_inline_index():
+    """Requirement: Structured passage_index takes precedence over conflicting inline reference."""
+    paper_id = uuid.uuid4()
+    p1_id = uuid.uuid4()
+    p2_id = uuid.uuid4()
+    passages = [
+        SelectedPassage(passage_id=p1_id, passage_index=1, page_start=1, page_end=1, section="Intro", text="Text for passage 1."),
+        SelectedPassage(passage_id=p2_id, passage_index=2, page_start=2, page_end=2, section="Methods", text="Text for passage 2."),
+    ]
+
+    provider = StubRealContractProvider(response_data={
+        "research_problem": "Conflict Resolution Test",
+        "statements": [
+            {
+                "statement_text": "Structured index takes priority over inline. (passage_index: 2)",
+                "statement_type": "FINDING",
+                "passage_index": 1,
+                "confidence": 0.95,
+            }
+        ]
+    })
+    extractor = ScientificPaperExtractor(provider=provider, model_name="test-conflict")
+    result = extractor.extract(paper_id=paper_id, selected_passages=passages)
+
+    assert result.extraction_status == ExtractionStatus.SUCCESS
+    assert len(result.research_statements) == 1
+    stmt = result.research_statements[0]
+
+    # 1. Structured index (1) takes precedence
+    # 2. Links to passage 1, not passage 2
+    assert stmt.source_passage_id == p1_id
+    assert stmt.source_passage_id != p2_id
+    assert stmt.section == "Intro"
+
+    # 3. Inline reference is removed from statement text
+    assert stmt.statement_text == "Structured index takes priority over inline."
+
+    # 4. recovered_inline_passage_index is NOT set when structured index was provided
+    assert stmt.metadata.get("model_reported_passage_index") == 1
+    assert "recovered_inline_passage_index" not in stmt.metadata
+
+
+def test_provenance_punctuation_normalization():
+    """Requirement: Verifies punctuation is preserved without duplication for both period placements."""
+    paper_id = uuid.uuid4()
+    p14_id = uuid.uuid4()
+    passages = [
+        SelectedPassage(passage_id=p14_id, passage_index=14, page_start=4, page_end=4, section="Training", text="Passage 14 text."),
+    ]
+
+    provider = StubRealContractProvider(response_data={
+        "research_problem": "Punctuation Normalization Test",
+        "statements": [
+            {
+                "statement_text": "Claim. (passage_index: 14)",
+                "statement_type": "FINDING",
+                "passage_index": None,
+            },
+            {
+                "statement_text": "Claim (passage_index: 14).",
+                "statement_type": "FINDING",
+                "passage_index": None,
+            },
+        ]
+    })
+    extractor = ScientificPaperExtractor(provider=provider, model_name="test-punctuation")
+    result = extractor.extract(paper_id=paper_id, selected_passages=passages)
+
+    assert result.extraction_status == ExtractionStatus.SUCCESS
+    assert len(result.research_statements) == 2
+
+    # Both must produce exactly "Claim." without duplicate punctuation
+    assert result.research_statements[0].statement_text == "Claim."
+    assert result.research_statements[0].source_passage_id == p14_id
+
+    assert result.research_statements[1].statement_text == "Claim."
+    assert result.research_statements[1].source_passage_id == p14_id
+
+
+def test_passage_index_0_based_description_and_mapping():
+    """Regression test: passage_index field description specifies 0-based indexing and maps index 0."""
+    # 1. Verify schema field description explicitly specifies 0-based indexing
+    field_info = RawStatementExtraction.model_fields["passage_index"]
+    assert field_info.description is not None
+    assert "0-based" in field_info.description
+    assert "[PASSAGE X]" in field_info.description
+
+    # 2. Verify passage selector generates 0-based headers matching index 0
+    p0_id = uuid.uuid4()
+    p0 = SelectedPassage(
+        passage_id=p0_id,
+        passage_index=0,
+        page_start=1,
+        page_end=1,
+        section="Introduction",
+        text="Background context in passage zero.",
+    )
+    prompt_text = PassageSelector.format_passages_for_prompt([p0])
+    assert "[PASSAGE 0 | Pages 1-1 | Section: Introduction]" in prompt_text
+
+    # 3. Verify extractor resolves 0-based passage_index=0 to the correct passage
+    paper_id = uuid.uuid4()
+    provider = StubRealContractProvider(response_data={
+        "research_problem": "0-Based Passage Test",
+        "statements": [
+            {
+                "statement_text": "Evidence found in passage zero.",
+                "statement_type": "FINDING",
+                "passage_index": 0,
+            }
+        ]
+    })
+    extractor = ScientificPaperExtractor(provider=provider, model_name="test-0-based")
+    result = extractor.extract(paper_id=paper_id, selected_passages=[p0])
+
+    assert result.extraction_status == ExtractionStatus.SUCCESS
+    assert len(result.research_statements) == 1
+    assert result.research_statements[0].source_passage_id == p0_id
+
+
+

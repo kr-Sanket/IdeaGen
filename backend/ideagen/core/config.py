@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from pydantic import Field, AliasChoices, field_validator
+
+# Must match ideagen.opportunity.ranking.get_candidate_ranker.
+SUPPORTED_CANDIDATE_RANKING_STRATEGIES = frozenset({"tfidf", "fifo"})
 
 # Resolve the project root (backend/) relative to this file.
 _BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
@@ -41,9 +44,114 @@ class Settings(BaseSettings):
     # ── Database ──────────────────────────────────────────────────────
     database_url: str | None = None
 
-    # ── LLM ───────────────────────────────────────────────────────────
-    gemini_api_key: str | None = Field(default=None, validation_alias="GEMINI_API_KEY")
-    gemini_model_name: str = Field(default="gemini-2.5-flash", validation_alias="GEMINI_MODEL_NAME")
+    # ── Providers & Models ────────────────────────────────────────────
+    llm_provider: str = Field(default="ollama", validation_alias=AliasChoices("IDEAGEN_LLM_PROVIDER", "LLM_PROVIDER"))
+    embedding_provider: str = Field(default="ollama", validation_alias=AliasChoices("IDEAGEN_EMBEDDING_PROVIDER", "EMBEDDING_PROVIDER"))
+
+    # ── Ollama ────────────────────────────────────────────────────────
+    ollama_base_url: str = Field(default="http://localhost:11434", validation_alias=AliasChoices("IDEAGEN_OLLAMA_BASE_URL", "OLLAMA_BASE_URL"))
+    ollama_model: str = Field(default="qwen3:8b", validation_alias=AliasChoices("IDEAGEN_OLLAMA_MODEL", "OLLAMA_MODEL"))
+    ollama_embedding_model: str = Field(default="nomic-embed-text", validation_alias=AliasChoices("IDEAGEN_OLLAMA_EMBEDDING_MODEL", "OLLAMA_EMBEDDING_MODEL"))
+    ollama_embedding_dimension: int = Field(default=768, validation_alias=AliasChoices("IDEAGEN_OLLAMA_EMBEDDING_DIMENSION", "OLLAMA_EMBEDDING_DIMENSION"))
+    ollama_timeout: float = Field(default=300.0, validation_alias=AliasChoices("IDEAGEN_OLLAMA_TIMEOUT", "OLLAMA_TIMEOUT"))
+    ollama_num_ctx: int = Field(default=8192, validation_alias=AliasChoices("IDEAGEN_OLLAMA_NUM_CTX", "OLLAMA_NUM_CTX"))
+    ollama_num_predict: int = Field(default=1024, validation_alias=AliasChoices("IDEAGEN_OLLAMA_NUM_PREDICT", "OLLAMA_NUM_PREDICT"))
+    ollama_recovery_num_predict: int = Field(default=2048, validation_alias=AliasChoices("IDEAGEN_OLLAMA_RECOVERY_NUM_PREDICT", "OLLAMA_RECOVERY_NUM_PREDICT"))
+    ollama_auto_manage: bool = Field(default=True, validation_alias=AliasChoices("IDEAGEN_OLLAMA_AUTO_MANAGE", "OLLAMA_AUTO_MANAGE", "IDEAGEN_OLLAMA_AUTO_START"))
+    ollama_idle_timeout: float = Field(default=60.0, validation_alias=AliasChoices("IDEAGEN_OLLAMA_IDLE_TIMEOUT", "OLLAMA_IDLE_TIMEOUT"))
+    ollama_startup_timeout: float = Field(default=30.0, validation_alias=AliasChoices("IDEAGEN_OLLAMA_STARTUP_TIMEOUT", "OLLAMA_STARTUP_TIMEOUT"))
+    ollama_polling_interval: float = Field(default=0.5, validation_alias=AliasChoices("IDEAGEN_OLLAMA_POLLING_INTERVAL", "OLLAMA_POLLING_INTERVAL"))
+    ollama_binary_path: str = Field(default="ollama", validation_alias=AliasChoices("IDEAGEN_OLLAMA_BINARY_PATH", "OLLAMA_BINARY_PATH"))
+
+    # ── Gemini (Preserved) ────────────────────────────────────────────
+    gemini_api_key: str | None = Field(default=None, validation_alias=AliasChoices("IDEAGEN_GEMINI_API_KEY", "GEMINI_API_KEY"))
+    gemini_model_name: str = Field(default="gemini-2.5-flash", validation_alias=AliasChoices("IDEAGEN_GEMINI_MODEL_NAME", "GEMINI_MODEL_NAME"))
+
+    # ── OpenAlex ──────────────────────────────────────────────────────
+    openalex_email: str | None = Field(default=None, validation_alias=AliasChoices("IDEAGEN_OPENALEX_EMAIL", "OPENALEX_EMAIL"))
+
+    # ── Evolution ─────────────────────────────────────────────────────
+    enable_post_ingestion_evolution: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "IDEAGEN_ENABLE_POST_INGESTION_EVOLUTION",
+            "ENABLE_POST_INGESTION_EVOLUTION",
+        ),
+    )
+    # Upper bound on eligible opportunities classified (one LLM call each) per ingested paper.
+    post_ingestion_evolution_max_candidates: int = Field(
+        default=20,
+        ge=1,
+        validation_alias=AliasChoices(
+            "IDEAGEN_POST_INGESTION_EVOLUTION_MAX_CANDIDATES",
+            "POST_INGESTION_EVOLUTION_MAX_CANDIDATES",
+        ),
+    )
+    # Strategy for ranking candidate opportunities during incremental evolution ("tfidf" or "fifo").
+    candidate_ranking_strategy: str = Field(
+        default="tfidf",
+        validation_alias=AliasChoices(
+            "IDEAGEN_CANDIDATE_RANKING_STRATEGY",
+            "CANDIDATE_RANKING_STRATEGY",
+        ),
+    )
+
+    @field_validator("candidate_ranking_strategy", mode="before")
+    @classmethod
+    def _validate_candidate_ranking_strategy(cls, value: object) -> str:
+        """Reject unknown strategies when settings load instead of on every ingestion."""
+        normalized = str(value).strip().lower() if value is not None else ""
+        if normalized not in SUPPORTED_CANDIDATE_RANKING_STRATEGIES:
+            raise ValueError(
+                f"Unsupported candidate ranking strategy {value!r}; "
+                f"expected one of {sorted(SUPPORTED_CANDIDATE_RANKING_STRATEGIES)}."
+            )
+        return normalized
+
+    # ── Discovery ─────────────────────────────────────────────────────
+    # Maximum candidate gaps validated by LLM during direct discovery (default 3, hard max 5).
+    discovery_max_candidates: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        validation_alias=AliasChoices(
+            "IDEAGEN_DISCOVERY_MAX_CANDIDATES",
+            "DISCOVERY_MAX_CANDIDATES",
+        ),
+    )
+
+    @field_validator("discovery_max_candidates", mode="before")
+    @classmethod
+    def _validate_discovery_max_candidates(cls, value: object) -> int:
+        if value is None:
+            return 3
+        if isinstance(value, bool):
+            raise ValueError(
+                f"Invalid discovery_max_candidates {value!r}; expected integer between 1 and 5, got boolean."
+            )
+        if isinstance(value, float):
+            raise ValueError(
+                f"Invalid discovery_max_candidates {value!r}; expected integer between 1 and 5, got float."
+            )
+        try:
+            if isinstance(value, str):
+                trimmed = value.strip()
+                if "." in trimmed:
+                    raise ValueError
+                val = int(trimmed)
+            elif isinstance(value, int):
+                val = value
+            else:
+                raise ValueError
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid discovery_max_candidates {value!r}; expected integer between 1 and 5."
+            ) from exc
+        if val < 1 or val > 5:
+            raise ValueError(
+                f"discovery_max_candidates must be between 1 and 5 (got {val})."
+            )
+        return val
 
     # ── Paths ─────────────────────────────────────────────────────────
     project_root: Path = _PROJECT_ROOT

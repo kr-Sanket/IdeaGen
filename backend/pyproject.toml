@@ -20,13 +20,14 @@ dependencies = [
     "psycopg2-binary>=2.9.9",
     "pymupdf>=1.24.0",
     "python-multipart>=0.0.9",
+    "requests>=2.31.0",
+    "numpy>=1.26",
+    "faiss-cpu>=1.8",
+    "scikit-learn>=1.5",
 ]
 
 [project.optional-dependencies]
 ml = [
-    "numpy>=1.26",
-    "faiss-cpu>=1.8",
-    "scikit-learn>=1.5",
     "sentence-transformers>=3.0",
 ]
 dev = [

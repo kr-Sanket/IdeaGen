@@ -6,6 +6,10 @@ class ProviderFailureError(LLMError):
     """Raised when the underlying LLM provider fails."""
     pass
 
+class ProviderConnectionError(ProviderFailureError):
+    """Raised when the LLM provider cannot be reached (e.g. connection refused, network failure, or timeout)."""
+    pass
+
 class MalformedResponseError(LLMError):
     """Raised when the LLM returns an unparseable or schema-violating response."""
     pass

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import enum
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 import uuid
 from pydantic import BaseModel, Field
@@ -97,7 +97,7 @@ class ResearchOpportunityDTO(BaseModel):
     supporting_paper_ids: List[uuid.UUID] = Field(default_factory=list)
     prior_art_statement_ids: List[uuid.UUID] = Field(default_factory=list)
     status: OpportunityStatus
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     # Reproducibility metadata
     generation_model: str = "gemini-2.5-flash"

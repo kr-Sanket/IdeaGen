@@ -60,9 +60,9 @@ class PriorArtRetriever:
 class PriorArtValidator:
     """Evaluates candidate opportunities against retrieved prior art for overlap and differentiation using LLM."""
 
-    def __init__(self, llm_provider: Optional[LLMProvider] = None, model_name: str = "gemini-2.5-flash"):
+    def __init__(self, llm_provider: Optional[LLMProvider] = None, model_name: Optional[str] = None):
         self.llm_provider = llm_provider
-        self.model_name = model_name
+        self.model_name = model_name or getattr(llm_provider, "model_name", "gemini-2.5-flash")
 
     def validate_prior_art(
         self,

@@ -14,10 +14,29 @@ BATCHES = [
 class BatchAssigner:
     @staticmethod
     def assign_batch(pub_date: date) -> TemporalBatch:
+        # 1. Preserve established historical batch mappings
         for b in BATCHES:
             if b.start_date <= pub_date <= b.end_date:
                 return b
-        raise ValueError(f"Date {pub_date} falls outside all defined temporal batches.")
+
+        # 2. For newly handled dates outside established fixed batches, compute calendar quarter (YYYY-QX)
+        quarter = (pub_date.month - 1) // 3 + 1
+        start_month = (quarter - 1) * 3 + 1
+        start_date = date(pub_date.year, start_month, 1)
+        if quarter == 1:
+            end_date = date(pub_date.year, 3, 31)
+        elif quarter == 2:
+            end_date = date(pub_date.year, 6, 30)
+        elif quarter == 3:
+            end_date = date(pub_date.year, 9, 30)
+        else:
+            end_date = date(pub_date.year, 12, 31)
+
+        return TemporalBatch(
+            id=f"{pub_date.year}-Q{quarter}",
+            start_date=start_date,
+            end_date=end_date,
+        )
 
 class PaperNormalizer:
     @staticmethod
@@ -32,6 +51,46 @@ class PaperNormalizer:
         elif doi.startswith("doi:"):
             doi = doi.replace("doi:", "", 1)
         return doi.strip()
+
+    @staticmethod
+    def normalize_openalex_id(raw_id: Optional[str]) -> Optional[str]:
+        """Normalizes OpenAlex work identifiers (URLs or short strings) to canonical 'W...' format.
+
+        Returns None for anything that is not an OpenAlex work identifier, so callers
+        never mistake free text (e.g. "Wasserstein GAN") for an ID.
+        """
+        cleaned = PaperNormalizer.strip_openalex_prefix(raw_id)
+        if not cleaned:
+            return None
+        if cleaned.upper().startswith("W") and cleaned[1:].isdigit():
+            return f"W{cleaned[1:]}"
+        if cleaned.isdigit():
+            return f"W{cleaned}"
+        return None
+
+    @staticmethod
+    def strip_openalex_prefix(raw_id: Optional[str]) -> Optional[str]:
+        """Removes a leading OpenAlex URL prefix and surrounding whitespace; None if empty."""
+        if not raw_id:
+            return None
+        cleaned = raw_id.strip()
+        for prefix in (
+            "https://openalex.org/",
+            "http://openalex.org/",
+            "https://api.openalex.org/works/",
+            "http://api.openalex.org/works/",
+            "openalex.org/",
+        ):
+            if cleaned.lower().startswith(prefix.lower()):
+                cleaned = cleaned[len(prefix):]
+                break
+        return cleaned.strip() or None
+
+    @staticmethod
+    def canonical_openalex_source_id(raw_id: Optional[str]) -> Optional[str]:
+        """Storage form of an OpenAlex source id: canonical 'W<digits>' when it is a work id,
+        otherwise the value with any OpenAlex URL prefix removed (case preserved)."""
+        return PaperNormalizer.normalize_openalex_id(raw_id) or PaperNormalizer.strip_openalex_prefix(raw_id)
 
 class OpenAlexResponseParser:
     @staticmethod
@@ -51,8 +110,12 @@ class OpenAlexResponseParser:
         return " ".join(word for _, word in word_positions)
 
     @staticmethod
-    def parse_work(work: Dict[str, Any], source_type: str = "OPENALEX_API") -> PaperCreateDTO:
-        source_id = work.get("id")
+    def parse_work(work: Dict[str, Any], source_type: Any = "OPENALEX_API") -> PaperCreateDTO:
+        raw_source_id = work.get("id")
+        if not raw_source_id:
+            raise ValueError("Missing OpenAlex ID")
+
+        source_id = PaperNormalizer.canonical_openalex_source_id(str(raw_source_id))
         if not source_id:
             raise ValueError("Missing OpenAlex ID")
             
@@ -76,8 +139,17 @@ class OpenAlexResponseParser:
         authors = work.get("authorships", [])
         referenced_works = work.get("referenced_works", [])
         
+        from .models import SourceType
+        if isinstance(source_type, str):
+            try:
+                st = SourceType(source_type)
+            except ValueError:
+                st = SourceType.OPENALEX_API
+        else:
+            st = source_type
+
         return PaperCreateDTO(
-            source_type=source_type,
+            source_type=st,
             source_id=source_id,
             doi=doi,
             title=title,

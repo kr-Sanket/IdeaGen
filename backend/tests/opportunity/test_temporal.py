@@ -23,7 +23,7 @@ def _make_paper(session, title="Test Paper", p_date=datetime.date(2024, 1, 1)):
         title=title,
         publication_date=p_date,
         batch_id="temporal-batch",
-        abstract="Test abstract",
+        abstract="Test abstract containing mock excerpt and E.",
         authors=[],
         referenced_works=[],
         raw_metadata={},
@@ -235,9 +235,12 @@ def test_duplicate_paper_reprocessing(session):
     session.commit()
     
     # Reprocess same paper, same batch
-    # AD-22 requires rejecting duplicates
-    with pytest.raises(ValueError, match="already exists for Opportunity"):
-        service.process_batch(session, opp.id, b, [p])
+    # Checkpoint 8 duplicate-safe replay: skips duplicate without crashing, preserving status
+    res2 = service.process_batch(session, opp.id, b, [p])
+    assert res2.final_status == OpportunityStatus.STRENGTHENED
+    assert res2.processed_paper_count == 0
+    assert res2.skipped_paper_count == 1
+    assert len(res2.events) == 0
 
 def test_deterministic_replay(session):
     opp = _make_opportunity(session, OpportunityStatus.OPEN)

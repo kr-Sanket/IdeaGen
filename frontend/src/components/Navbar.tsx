@@ -1,72 +1,385 @@
-import React from 'react';
-import { Sparkles, BookOpen, GitFork, Lightbulb, BarChart3, FlaskConical } from 'lucide-react';
-
-export type TabView = 'overview' | 'literature' | 'landscape' | 'gaps' | 'opportunities' | 'evaluation';
+import React, { useEffect, useState, useRef } from 'react';
+import {
+  Layers,
+  Compass,
+  BookOpen,
+  LayoutDashboard,
+  Settings,
+  Lightbulb,
+  GitBranch,
+  History,
+  ChevronDown,
+  Check,
+  FolderPlus,
+  Play,
+  Loader2,
+} from 'lucide-react';
+import { api } from '../api/client';
+import type { RouteName } from '../router';
+import type { BackendHealth, ResearchProject } from '../types';
+import { syncProjectsWithServer } from '../projects/projectStore';
+import { useRunMonitor } from '../workflow/runMonitor';
 
 interface NavbarProps {
-  currentTab: TabView;
-  onSelectTab: (tab: TabView) => void;
+  currentRoute: RouteName;
+  activeProject: ResearchProject;
+  projects: ResearchProject[];
+  onSelectProject: (projectId: string) => void;
+  onOpenCreateProject: () => void;
+  onOpenNewRunModal: () => void;
+  onNavigate: (route: string) => void;
 }
 
-export const Navbar: React.FC<NavbarProps> = ({ currentTab, onSelectTab }) => {
-  const navItems: { id: TabView; label: string; icon: React.ReactNode }[] = [
-    { id: 'overview', label: 'Overview', icon: <BarChart3 className="w-4 h-4" /> },
-    { id: 'literature', label: 'Literature', icon: <BookOpen className="w-4 h-4" /> },
-    { id: 'landscape', label: 'Research Landscape', icon: <GitFork className="w-4 h-4" /> },
-    { id: 'gaps', label: 'Research Gaps', icon: <Sparkles className="w-4 h-4" /> },
-    { id: 'opportunities', label: 'Opportunity Studio', icon: <Lightbulb className="w-4 h-4" /> },
-    { id: 'evaluation', label: 'Evaluation', icon: <FlaskConical className="w-4 h-4 text-slate-400" /> },
+export const Navbar: React.FC<NavbarProps> = ({
+  currentRoute,
+  activeProject,
+  projects,
+  onSelectProject,
+  onOpenCreateProject,
+  onOpenNewRunModal,
+  onNavigate,
+}) => {
+  const [backendHealth, setBackendHealth] = useState<BackendHealth | null>(null);
+  const [isDropdownOpen, setIsDropdownOpen] = useState<boolean>(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const { monitoredRun, openRunProgress } = useRunMonitor();
+
+  // Poll faster while the API is not healthy so recovery shows without a reload, and re-check
+  // immediately when the window regains focus or the browser comes back online.
+  useEffect(() => {
+    let mounted = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let previous: BackendHealth | null = null;
+    const check = async () => {
+      if (timer) clearTimeout(timer);
+      const health = await api.checkBackendHealth();
+      if (!mounted) return;
+      setBackendHealth(health);
+      if (health === 'online' && previous !== 'online') {
+        // Register any locally created projects the backend has not seen yet.
+        void syncProjectsWithServer();
+      }
+      previous = health;
+      timer = setTimeout(check, health === 'online' ? 15000 : 3000);
+    };
+    void check();
+    const onWake = () => void check();
+    window.addEventListener('focus', onWake);
+    window.addEventListener('online', onWake);
+    return () => {
+      mounted = false;
+      if (timer) clearTimeout(timer);
+      window.removeEventListener('focus', onWake);
+      window.removeEventListener('online', onWake);
+    };
+  }, []);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setIsDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const globalNavItems = [
+    {
+      id: 'dashboard',
+      path: '#/dashboard',
+      label: 'Dashboard',
+      icon: <LayoutDashboard size={15} />,
+      active: currentRoute === 'dashboard',
+    },
+    {
+      id: 'workspaces',
+      path: '#/workspaces',
+      label: 'Workspaces',
+      icon: <Layers size={15} />,
+      active: currentRoute === 'workspaces',
+    },
+    {
+      id: 'settings',
+      path: '#/settings',
+      label: 'Settings',
+      icon: <Settings size={15} />,
+      active: currentRoute === 'settings',
+    },
   ];
 
+  const projectNavItems = [
+    {
+      id: 'overview',
+      path: `#/projects/${activeProject.id}/overview`,
+      label: 'Overview',
+      icon: <LayoutDashboard size={14} />,
+      active: currentRoute === 'project-overview' || currentRoute === 'overview',
+    },
+    {
+      id: 'papers',
+      path: `#/projects/${activeProject.id}/papers`,
+      label: 'Papers',
+      icon: <BookOpen size={14} />,
+      active: currentRoute === 'project-papers' || currentRoute === 'search' || currentRoute === 'corpus',
+    },
+    {
+      id: 'gaps',
+      path: `#/projects/${activeProject.id}/gaps`,
+      label: 'Research Gaps',
+      icon: <Lightbulb size={14} />,
+      active: currentRoute === 'project-gaps' || currentRoute === 'gaps',
+    },
+    {
+      id: 'opportunities',
+      path: `#/projects/${activeProject.id}/opportunities`,
+      label: 'Opportunities',
+      icon: <Compass size={14} />,
+      active: currentRoute === 'project-opportunities' || currentRoute === 'project-opportunity-detail' || currentRoute === 'opportunities' || currentRoute === 'opportunity-detail',
+    },
+    {
+      id: 'evolution',
+      path: `#/projects/${activeProject.id}/evolution`,
+      label: 'Evolution',
+      icon: <GitBranch size={14} />,
+      active: currentRoute === 'project-evolution' || currentRoute === 'evolution',
+    },
+    {
+      id: 'history',
+      path: `#/projects/${activeProject.id}/history`,
+      label: 'Run History',
+      icon: <History size={14} />,
+      active: currentRoute === 'project-history' || currentRoute === 'history',
+    },
+  ];
+
+  const handleSelectProj = (id: string) => {
+    setIsDropdownOpen(false);
+    onSelectProject(id);
+    onNavigate(`#/projects/${id}/overview`);
+  };
+
   return (
-    <header className="sticky top-0 z-40 bg-slate-950/90 backdrop-blur-md border-b border-slate-800">
-      <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
-        
-        {/* Brand logo */}
-        <div className="flex items-center space-x-3 cursor-pointer" onClick={() => onSelectTab('overview')}>
-          <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-600 to-cyan-500 flex items-center justify-center shadow-lg shadow-indigo-500/20">
-            <Sparkles className="w-5 h-5 text-white" />
-          </div>
-          <div>
-            <div className="flex items-center space-x-2">
-              <span className="font-bold text-lg tracking-tight text-white">IdeaGen</span>
-              <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-800/60 font-semibold">
-                v2.0
-              </span>
+    <header className="app-navbar">
+      {/* ── Top Tier: Global Shell Navigation ── */}
+      <div className="navbar-container">
+        {/* Brand identity */}
+        <button
+          type="button"
+          className="navbar-brand"
+          onClick={() => onNavigate('#/dashboard')}
+          aria-label="IdeaGen home: Dashboard"
+        >
+          <img
+            src="/ideagen logo 1.jpeg"
+            alt="IdeaGen Logo"
+            className="navbar-logo-img"
+          />
+          <div className="navbar-brand-text">
+            <div className="navbar-brand-row">
+              <span className="navbar-brand-name">IdeaGen</span>
+              <span className="navbar-brand-badge">Research Lab</span>
             </div>
-            <span className="text-[11px] text-slate-400 block -mt-1 font-sans">
-              Evidence-Grounded Research Discovery
+            <span className="navbar-brand-subtitle">
+              Evidence-Grounded Opportunity Discovery
             </span>
           </div>
-        </div>
+        </button>
 
-        {/* Navigation Tabs */}
-        <nav className="flex space-x-1 bg-slate-900/80 p-1 rounded-xl border border-slate-800/80">
-          {navItems.map((item) => {
-            const active = currentTab === item.id;
-            return (
+        {/* Global Navigation Tabs */}
+        <nav className="navbar-nav" aria-label="Global Navigation">
+          {globalNavItems.map((item) => (
+            <button
+              type="button"
+              key={item.id}
+              onClick={() => onNavigate(item.path)}
+              className={`navbar-tab-btn ${item.active ? 'active' : ''}`}
+              aria-current={item.active ? 'page' : undefined}
+            >
+              {item.icon}
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </nav>
+
+        {/* Project Switcher Dropdown & Connectivity */}
+        <div className="u-row" style={{ gap: '0.875rem' }}>
+          {/* Active Project Switcher */}
+          <div className="project-switcher-container" ref={dropdownRef}>
+            <button
+              type="button"
+              className="project-switcher-btn"
+              onClick={() => setIsDropdownOpen(!isDropdownOpen)}
+              aria-expanded={isDropdownOpen}
+              aria-haspopup="true"
+              id="project-switcher-trigger"
+            >
+              <div className="switcher-label-col">
+                <span className="switcher-hint">Current Project</span>
+                <span className="switcher-active-name" title={activeProject.name}>
+                  {activeProject.name}
+                </span>
+              </div>
+              <ChevronDown size={14} className={`switcher-arrow ${isDropdownOpen ? 'open' : ''}`} />
+            </button>
+
+            {isDropdownOpen && (
+              <div className="project-dropdown-menu animate-fade-in" role="menu">
+                <div className="dropdown-section-label">Your Projects</div>
+                <div className="dropdown-projects-list">
+                  {projects.map((proj) => {
+                    const isSelected = proj.id === activeProject.id;
+                    return (
+                      <button
+                        key={proj.id}
+                        type="button"
+                        className={`dropdown-project-item ${isSelected ? 'selected' : ''}`}
+                        onClick={() => handleSelectProj(proj.id)}
+                        role="menuitem"
+                      >
+                        <div className="dropdown-item-info">
+                          <div className="u-row" style={{ gap: '0.375rem' }}>
+                            <span className="dropdown-item-title">{proj.name}</span>
+                            {proj.isDefaultBenchmark && (
+                              <span className="badge badge-primary" style={{ fontSize: '0.5625rem' }}>
+                                Benchmark
+                              </span>
+                            )}
+                          </div>
+                          <span className="dropdown-item-topic">{proj.topic}</span>
+                        </div>
+                        {isSelected && <Check size={14} className="text-primary" />}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="dropdown-divider" />
+
+                <button
+                  type="button"
+                  className="dropdown-create-btn"
+                  onClick={() => {
+                    setIsDropdownOpen(false);
+                    onOpenCreateProject();
+                  }}
+                  role="menuitem"
+                >
+                  <FolderPlus size={14} />
+                  <span>+ Create New Project</span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Active Background Research Run Indicator */}
+          {monitoredRun && (monitoredRun.status === 'RUNNING' || monitoredRun.status === 'PENDING') && (
+            <div
+              className="status-indicator status-run-active"
+              id="nav-active-run-indicator"
+              title={`Research run ${monitoredRun.runId} is executing for project: ${monitoredRun.projectName || monitoredRun.projectId}`}
+            >
+              <Loader2 size={13} className="spin text-primary" />
+              <div className="run-indicator-text">
+                <span className="run-indicator-label">
+                  {monitoredRun.projectId !== activeProject.id
+                    ? `${monitoredRun.projectName ? (monitoredRun.projectName.length > 20 ? monitoredRun.projectName.slice(0, 18) + '…' : monitoredRun.projectName) : 'Other Project'}: `
+                    : ''}
+                  {monitoredRun.currentStage ? monitoredRun.currentStage : (monitoredRun.status === 'PENDING' ? 'Pending' : 'Running')}
+                </span>
+              </div>
               <button
+                type="button"
+                className="btn-link-action"
+                onClick={() => {
+                  if (monitoredRun.projectId !== activeProject.id) {
+                    onSelectProject(monitoredRun.projectId);
+                    onNavigate(`#/projects/${monitoredRun.projectId}/overview`);
+                  }
+                  openRunProgress(monitoredRun.runId, monitoredRun.projectId);
+                }}
+                id="btn-nav-view-progress"
+                title="Open run progress monitor"
+              >
+                View Progress
+              </button>
+            </div>
+          )}
+
+          {/* Backend Connectivity Status */}
+          <div className="navbar-status-wrapper">
+            {backendHealth === null ? (
+              <div className="status-indicator status-checking" title="Connecting to the IdeaGen API...">
+                <span className="status-dot animate-pulse" />
+                <span className="status-label">Checking</span>
+              </div>
+            ) : backendHealth === 'online' ? (
+              <div className="status-indicator status-online" title="The IdeaGen API and its database are responding.">
+                <span className="status-dot status-dot-online" />
+                <span className="status-label">API Connected</span>
+              </div>
+            ) : backendHealth === 'degraded' ? (
+              <div className="status-indicator status-offline" title="The API is running but reports a database connection error.">
+                <span className="status-dot status-dot-offline" />
+                <span className="status-label">Database Error</span>
+              </div>
+            ) : (
+              <div
+                className="status-indicator status-offline"
+                title="No response from the IdeaGen API through the /api dev proxy. Check that the backend is running and that the frontend process may open local connections. Retrying every few seconds."
+                role="status"
+              >
+                <span className="status-dot status-dot-offline" />
+                <span className="status-label">API Offline</span>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Second Tier: Project Context & Sub-navigation ── */}
+      <div className="navbar-project-bar">
+        <div className="navbar-project-container">
+          {/* Active project context pill */}
+          <div className="project-context-badge">
+            <span className="project-context-label">Project:</span>
+            <strong className="project-context-name" title={activeProject.name}>
+              {activeProject.name}
+            </strong>
+            <span className="badge badge-default" style={{ fontSize: '0.625rem' }}>
+              Cutoff: {activeProject.temporalCutoff || 'None'}
+            </span>
+          </div>
+
+          {/* Project-specific navigation items */}
+          <nav className="project-nav-items" aria-label="Project Sections">
+            {projectNavItems.map((item) => (
+              <button
+                type="button"
                 key={item.id}
-                onClick={() => onSelectTab(item.id)}
-                className={`flex items-center space-x-2 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                  active
-                    ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30 font-semibold'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
-                }`}
+                onClick={() => onNavigate(item.path)}
+                className={`project-tab-btn ${item.active ? 'active' : ''}`}
+                aria-current={item.active ? 'page' : undefined}
               >
                 {item.icon}
                 <span>{item.label}</span>
               </button>
-            );
-          })}
-        </nav>
+            ))}
+          </nav>
 
-        {/* System Status indicator */}
-        <div className="flex items-center space-x-2 text-xs text-emerald-400 bg-emerald-950/40 px-3 py-1.5 rounded-full border border-emerald-800/40 font-mono">
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-          <span>Pipeline Ready</span>
+          {/* Prominent New Research Run Action */}
+          <button
+            type="button"
+            className="btn btn-primary btn-sm btn-new-run"
+            onClick={onOpenNewRunModal}
+            id="nav-btn-new-run"
+            title="Start or configure a new research run"
+          >
+            <Play size={13} />
+            <span>New Research Run</span>
+          </button>
         </div>
-
       </div>
     </header>
   );

@@ -106,8 +106,10 @@ class StubValidationProvider(LLMProvider):
         self.verdict = verdict
         self.reasoning = reasoning
         self.cited_ids = cited_ids or []
+        self.last_prompt = None
 
     def generate_structured(self, prompt: str, response_schema):
+        self.last_prompt = prompt
         return response_schema(
             verdict=self.verdict,
             reasoning=self.reasoning,
@@ -354,9 +356,308 @@ def test_evidence_integrity_rejects_hallucinated_statement_ids():
     validator = GapValidator(provider=fake_provider, min_valid_evidence=1)
     res = validator.validate_candidate(candidate, statements_by_id)
 
-    # Must retain verified statements or reject if fake ID was provided
-    # Verified statements from candidate pool should not contain the fake_id
+    # Must fail closed: rejected, empty supporting statements, fake ID rejected
+    assert res.status == GapStatus.REJECTED
     assert fake_id not in res.supporting_statement_ids
+    assert res.supporting_statement_ids == []
+    assert res.evidence_count == 0
+    assert res.metadata.get("rejection_reason") == "INVALID_OR_FABRICATED_CITATIONS"
+
+
+def test_validator_includes_original_passage_when_available():
+    """Requirement 1: Original passage text is included in validator evidence block when available."""
+    s1_id = uuid.uuid4()
+    pass_id = uuid.uuid4()
+    p1 = uuid.uuid4()
+
+    passage_text = "Detailed empirical findings show distractor documents degrade precision from 85% to 22%."
+    statements_by_id = {
+        s1_id: {
+            "id": s1_id,
+            "paper_id": p1,
+            "passage_id": pass_id,
+            "statement_type": "LIMITATION",
+            "statement_text": "Distractors cause severe degradation.",
+            "section": "Experiments",
+        }
+    }
+    passages_by_id = {
+        pass_id: {
+            "id": pass_id,
+            "paper_id": p1,
+            "text": passage_text,
+        }
+    }
+
+    candidate = GapCandidate(
+        gap_statement="Distractor sensitivity in RAG.",
+        research_problem="Robustness under distraction.",
+        why_existing_work_insufficient="Prior methods fail on noisy inputs.",
+        supporting_statement_ids=[s1_id],
+        supporting_paper_ids=[p1],
+        relevant_limitations=["Distractors cause severe degradation."],
+        relevant_future_work=[],
+    )
+
+    provider = StubValidationProvider(
+        verdict=ValidationVerdict.VALID,
+        reasoning="Passage confirms empirical degradation.",
+        cited_ids=[str(s1_id)],
+    )
+
+    validator = GapValidator(provider=provider, min_valid_evidence=1)
+    res = validator.validate_candidate(candidate, statements_by_id, passages_by_id=passages_by_id)
+
+    assert res.status == GapStatus.VALIDATED
+    assert provider.last_prompt is not None
+    # Verify original passage text is present in the prompt evidence block
+    assert passage_text in provider.last_prompt
+    assert str(s1_id) in provider.last_prompt
+    assert str(p1) in provider.last_prompt
+    assert "Distractors cause severe degradation." in provider.last_prompt
+    assert "Section: Experiments" in provider.last_prompt
+
+
+def test_validator_handles_missing_or_unlinked_passage_explicitly():
+    """Requirement 2: Missing or unlinked passage references are marked unavailable explicitly."""
+    s1_id = uuid.uuid4()
+    s2_id = uuid.uuid4()
+    missing_pass_id = uuid.uuid4()
+    p1 = uuid.uuid4()
+
+    statements_by_id = {
+        s1_id: {
+            "id": s1_id,
+            "paper_id": p1,
+            "passage_id": None,  # Explicitly unlinked
+            "statement_type": "LIMITATION",
+            "statement_text": "Unlinked limitation.",
+        },
+        s2_id: {
+            "id": s2_id,
+            "paper_id": p1,
+            "passage_id": missing_pass_id,  # Linked to ID not in passage map
+            "statement_type": "LIMITATION",
+            "statement_text": "Missing passage reference statement.",
+        },
+    }
+
+    candidate = GapCandidate(
+        gap_statement="Missing passage test gap.",
+        research_problem="Robustness evaluation.",
+        why_existing_work_insufficient="Insufficient.",
+        supporting_statement_ids=[s1_id, s2_id],
+        supporting_paper_ids=[p1],
+        relevant_limitations=["Unlinked limitation."],
+        relevant_future_work=[],
+    )
+
+    provider = StubValidationProvider(
+        verdict=ValidationVerdict.VALID,
+        reasoning="Valid verdict test.",
+        cited_ids=[str(s1_id), str(s2_id)],
+    )
+
+    validator = GapValidator(provider=provider, min_valid_evidence=1)
+    # passages_by_id is empty, so s1 has no passage_id and s2 has missing passage
+    res = validator.validate_candidate(candidate, statements_by_id, passages_by_id={})
+
+    assert provider.last_prompt is not None
+    assert "[Source passage unavailable - no linked passage]" in provider.last_prompt
+    assert "[Source passage unavailable - passage not found in database]" in provider.last_prompt
+
+
+def test_validator_rejects_valid_verdict_with_empty_citations():
+    """Requirement 3: A VALID verdict with an empty evidence-ID list is not accepted (fails closed)."""
+    s1_id = uuid.uuid4()
+    p1 = uuid.uuid4()
+
+    statements_by_id = {
+        s1_id: {"id": s1_id, "paper_id": p1, "statement_type": "LIMITATION", "statement_text": "Limitation."}
+    }
+
+    candidate = GapCandidate(
+        gap_statement="Unaddressed gap.",
+        research_problem="Problem.",
+        why_existing_work_insufficient="Insufficient.",
+        supporting_statement_ids=[s1_id],
+        supporting_paper_ids=[p1],
+        relevant_limitations=["Limitation."],
+        relevant_future_work=[],
+    )
+
+    provider = StubValidationProvider(
+        verdict=ValidationVerdict.VALID,
+        reasoning="Model asserts valid without citing any evidence ID.",
+        cited_ids=[],  # Empty citations
+    )
+
+    validator = GapValidator(provider=provider, min_valid_evidence=1)
+    res = validator.validate_candidate(candidate, statements_by_id)
+
+    # Must NOT adopt candidate pool; must fail closed and reject
+    assert res.status == GapStatus.REJECTED
+    assert res.supporting_statement_ids == []
+    assert res.evidence_count == 0
+    assert res.metadata.get("rejection_reason") == "EMPTY_EVIDENCE_CITATIONS"
+    assert "no evidence statement citations" in res.validation_reasoning
+
+
+def test_validator_rejects_valid_verdict_with_fabricated_ids():
+    """Requirement 4: A VALID verdict with fabricated IDs is not accepted."""
+    s1_id = uuid.uuid4()
+    p1 = uuid.uuid4()
+
+    statements_by_id = {
+        s1_id: {"id": s1_id, "paper_id": p1, "statement_type": "LIMITATION", "statement_text": "Real statement."}
+    }
+
+    candidate = GapCandidate(
+        gap_statement="Unaddressed gap.",
+        research_problem="Problem.",
+        why_existing_work_insufficient="Insufficient.",
+        supporting_statement_ids=[s1_id],
+        supporting_paper_ids=[p1],
+        relevant_limitations=["Real statement."],
+        relevant_future_work=[],
+    )
+
+    provider = StubValidationProvider(
+        verdict=ValidationVerdict.VALID,
+        reasoning="Fabricated IDs cited.",
+        cited_ids=[str(uuid.uuid4()), "not-a-valid-uuid", str(uuid.uuid4())],
+    )
+
+    validator = GapValidator(provider=provider, min_valid_evidence=1)
+    res = validator.validate_candidate(candidate, statements_by_id)
+
+    assert res.status == GapStatus.REJECTED
+    assert res.supporting_statement_ids == []
+    assert res.evidence_count == 0
+    assert res.metadata.get("rejection_reason") == "INVALID_OR_FABRICATED_CITATIONS"
+
+
+def test_validator_rejects_ids_outside_candidate_evidence_pool():
+    """Requirement 5: IDs belonging to statements outside candidate evidence pool are rejected."""
+    s1_id = uuid.uuid4()
+    s2_id = uuid.uuid4()  # In DB, but NOT in this candidate's pool
+    p1 = uuid.uuid4()
+
+    statements_by_id = {
+        s1_id: {"id": s1_id, "paper_id": p1, "statement_type": "LIMITATION", "statement_text": "Candidate limitation."},
+        s2_id: {"id": s2_id, "paper_id": p1, "statement_type": "LIMITATION", "statement_text": "Unrelated limitation."},
+    }
+
+    candidate = GapCandidate(
+        gap_statement="Candidate gap statement.",
+        research_problem="Problem.",
+        why_existing_work_insufficient="Insufficient.",
+        supporting_statement_ids=[s1_id],  # ONLY s1 is in candidate pool
+        supporting_paper_ids=[p1],
+        relevant_limitations=["Candidate limitation."],
+        relevant_future_work=[],
+    )
+
+    # Case A: Model cites ONLY the external statement ID s2
+    provider_external_only = StubValidationProvider(
+        verdict=ValidationVerdict.VALID,
+        reasoning="Cites statement outside candidate pool.",
+        cited_ids=[str(s2_id)],
+    )
+
+    validator = GapValidator(provider=provider_external_only, min_valid_evidence=1)
+    res_external = validator.validate_candidate(candidate, statements_by_id)
+
+    assert res_external.status == GapStatus.REJECTED
+    assert res_external.supporting_statement_ids == []
+    assert s2_id not in res_external.supporting_statement_ids
+    assert res_external.metadata.get("rejection_reason") == "INVALID_OR_FABRICATED_CITATIONS"
+
+    # Case B: Model cites BOTH valid candidate ID (s1) and external ID (s2)
+    provider_mixed = StubValidationProvider(
+        verdict=ValidationVerdict.VALID,
+        reasoning="Cites mixed IDs.",
+        cited_ids=[str(s1_id), str(s2_id)],
+    )
+
+    validator_mixed = GapValidator(provider=provider_mixed, min_valid_evidence=1)
+    res_mixed = validator_mixed.validate_candidate(candidate, statements_by_id)
+
+    assert res_mixed.status == GapStatus.VALIDATED
+    assert res_mixed.supporting_statement_ids == [s1_id]
+    assert s2_id not in res_mixed.supporting_statement_ids
+    assert res_mixed.evidence_count == 1
+
+
+def test_validator_accepts_valid_verdict_with_valid_candidate_ids():
+    """Requirement 6: A VALID verdict with valid candidate-associated IDs can still pass."""
+    s1_id = uuid.uuid4()
+    s2_id = uuid.uuid4()
+    p1 = uuid.uuid4()
+    p2 = uuid.uuid4()
+
+    statements_by_id = {
+        s1_id: {"id": s1_id, "paper_id": p1, "statement_type": "LIMITATION", "statement_text": "Limitation 1.", "section": "Limitations"},
+        s2_id: {"id": s2_id, "paper_id": p2, "statement_type": "LIMITATION", "statement_text": "Limitation 2.", "section": "Discussion"},
+    }
+
+    candidate = GapCandidate(
+        gap_statement="Valid recurring limitation.",
+        research_problem="Problem.",
+        why_existing_work_insufficient="Insufficient.",
+        supporting_statement_ids=[s1_id, s2_id],
+        supporting_paper_ids=[p1, p2],
+        relevant_limitations=["Limitation 1.", "Limitation 2."],
+        relevant_future_work=[],
+    )
+
+    provider = StubValidationProvider(
+        verdict=ValidationVerdict.VALID,
+        reasoning="Both empirical limitations substantiate the candidate gap.",
+        cited_ids=[str(s1_id), str(s2_id)],
+    )
+
+    validator = GapValidator(provider=provider, min_valid_evidence=1)
+    res = validator.validate_candidate(candidate, statements_by_id)
+
+    assert res.status == GapStatus.VALIDATED
+    assert set(res.supporting_statement_ids) == {s1_id, s2_id}
+    assert res.evidence_count == 2
+    assert len(res.evidence_items) == 2
+    assert res.validation_reasoning == "Both empirical limitations substantiate the candidate gap."
+
+
+def test_validator_preserves_explicit_rejection_behavior():
+    """Requirement 7: Explicit model rejection behavior remains intact."""
+    s1_id = uuid.uuid4()
+    p1 = uuid.uuid4()
+
+    statements_by_id = {
+        s1_id: {"id": s1_id, "paper_id": p1, "statement_type": "LIMITATION", "statement_text": "Solvable constraint."}
+    }
+
+    candidate = GapCandidate(
+        gap_statement="Purported gap.",
+        research_problem="Problem.",
+        why_existing_work_insufficient="Insufficient.",
+        supporting_statement_ids=[s1_id],
+        supporting_paper_ids=[p1],
+        relevant_limitations=["Solvable constraint."],
+        relevant_future_work=[],
+    )
+
+    provider = StubValidationProvider(
+        verdict=ValidationVerdict.REJECT,
+        reasoning="Candidate is trivial and already addressed by existing literature.",
+        cited_ids=[str(s1_id)],
+    )
+
+    validator = GapValidator(provider=provider, min_valid_evidence=1)
+    res = validator.validate_candidate(candidate, statements_by_id)
+
+    assert res.status == GapStatus.REJECTED
+    assert res.validation_reasoning == "Candidate is trivial and already addressed by existing literature."
+    assert res.metadata.get("model_verdict") == "REJECT"
 
 
 def test_gap_persistence_and_evidence_relationships(session):
@@ -450,3 +751,427 @@ def test_gap_persistence_and_evidence_relationships(session):
     assert evidence_records[0].statement_id == statement.id
     assert evidence_records[0].paper_id == paper_id
     assert evidence_records[0].evidence_role == "LIMITATION"
+
+
+# ============================================================================
+# Phase 1 Candidate Generation Quality Regression Tests
+# ============================================================================
+
+
+def test_pattern_analyzer_assumption_alone_produces_no_limitation_candidate():
+    """Requirement 1: An ASSUMPTION statement alone produces no limitation candidate."""
+    analyzer = ResearchPatternAnalyzer(min_supporting_evidence=1)
+    s_id = uuid.uuid4()
+    p_id = uuid.uuid4()
+
+    statements = [
+        {
+            "id": s_id,
+            "paper_id": p_id,
+            "statement_type": "ASSUMPTION",
+            "statement_text": "We assume that Wikipedia passages contain all necessary factual knowledge.",
+        }
+    ]
+
+    cluster = SemanticCluster(
+        cluster_id=0,
+        statements=statements,
+        paper_ids={p_id},
+        centroid=np.ones(10, dtype=np.float32),
+        statement_type_counts={"ASSUMPTION": 1},
+    )
+
+    candidates = analyzer.analyze_clusters([cluster])
+    assert len(candidates) == 0
+
+
+def test_pattern_analyzer_positive_sufficiency_statement_not_a_limitation():
+    """Requirement 2: A positive sufficiency statement does not become a limitation candidate."""
+    analyzer = ResearchPatternAnalyzer(min_supporting_evidence=1)
+    s_id = uuid.uuid4()
+    p_id = uuid.uuid4()
+
+    statements = [
+        {
+            "id": s_id,
+            "paper_id": p_id,
+            "statement_type": "LIMITATION",  # Even if misclassified by upstream extractor
+            "statement_text": "Fine-tuning the query encoder BERTq and BART generator is sufficient for strong performance.",
+        }
+    ]
+
+    cluster = SemanticCluster(
+        cluster_id=0,
+        statements=statements,
+        paper_ids={p_id},
+        centroid=np.ones(10, dtype=np.float32),
+        statement_type_counts={"LIMITATION": 1},
+    )
+
+    candidates = analyzer.analyze_clusters([cluster])
+    assert len(candidates) == 0
+
+
+def test_pattern_analyzer_feasibility_statement_not_a_limitation():
+    """Requirement 3: A feasibility statement about adapting a model does not become a limitation."""
+    analyzer = ResearchPatternAnalyzer(min_supporting_evidence=1)
+    s_id = uuid.uuid4()
+    p_id = uuid.uuid4()
+
+    statements = [
+        {
+            "id": s_id,
+            "paper_id": p_id,
+            "statement_type": "LIMITATION",  # Even if misclassified as limitation
+            "statement_text": "RAG models can be adapted for sequence classification by treating the target class as a single-token sequence.",
+        }
+    ]
+
+    cluster = SemanticCluster(
+        cluster_id=0,
+        statements=statements,
+        paper_ids={p_id},
+        centroid=np.ones(10, dtype=np.float32),
+        statement_type_counts={"LIMITATION": 1},
+    )
+
+    candidates = analyzer.analyze_clusters([cluster])
+    assert len(candidates) == 0
+
+
+def test_pattern_analyzer_explicit_limitation_produces_eligible_candidate():
+    """Requirement 4: A genuine explicit limitation still produces an eligible candidate."""
+    analyzer = ResearchPatternAnalyzer(min_supporting_evidence=1)
+    s_id = uuid.uuid4()
+    p_id = uuid.uuid4()
+
+    statements = [
+        {
+            "id": s_id,
+            "paper_id": p_id,
+            "statement_type": "LIMITATION",
+            "statement_text": "Current graph traversal introduces significant latency and inference overhead.",
+        }
+    ]
+
+    cluster = SemanticCluster(
+        cluster_id=0,
+        statements=statements,
+        paper_ids={p_id},
+        centroid=np.ones(10, dtype=np.float32),
+        statement_type_counts={"LIMITATION": 1},
+    )
+
+    candidates = analyzer.analyze_clusters([cluster])
+    assert len(candidates) == 1
+
+    gap = candidates[0]
+    # Single-paper limitation must not claim to be "recurring across methodologies"
+    assert gap.signals["pattern_type"] == "DOCUMENTED_LIMITATION"
+    assert "Documented scientific limitation" in gap.gap_statement
+    assert "Significant latency and inference overhead" in gap.gap_statement or "Current graph traversal" in gap.gap_statement
+
+
+def test_pattern_analyzer_single_vs_multi_paper_corroboration():
+    """Requirement 5: Multi-paper corroboration yields RECURRING_LIMITATIONS while single-paper yields DOCUMENTED_LIMITATION."""
+    analyzer = ResearchPatternAnalyzer(min_supporting_evidence=1)
+    s1_id = uuid.uuid4()
+    s2_id = uuid.uuid4()
+    p1 = uuid.uuid4()
+    p2 = uuid.uuid4()
+
+    statements = [
+        {
+            "id": s1_id,
+            "paper_id": p1,
+            "statement_type": "LIMITATION",
+            "statement_text": "Context pruning fails to filter distractor passages in complex QA.",
+        },
+        {
+            "id": s2_id,
+            "paper_id": p2,
+            "statement_type": "LIMITATION",
+            "statement_text": "Irrelevant documents cause severe hallucination degradation in generation.",
+        },
+    ]
+
+    cluster = SemanticCluster(
+        cluster_id=0,
+        statements=statements,
+        paper_ids={p1, p2},
+        centroid=np.ones(10, dtype=np.float32),
+        statement_type_counts={"LIMITATION": 2},
+    )
+
+    candidates = analyzer.analyze_clusters([cluster])
+    assert len(candidates) == 1
+
+    gap = candidates[0]
+    # With distinct papers, recurring pattern is valid
+    assert gap.signals["pattern_type"] == "RECURRING_LIMITATIONS"
+    assert "Persistent scientific limitation across current methodologies" in gap.gap_statement
+    assert s1_id in gap.supporting_statement_ids
+    assert s2_id in gap.supporting_statement_ids
+    assert p1 in gap.supporting_paper_ids
+    assert p2 in gap.supporting_paper_ids
+
+
+def test_pattern_analyzer_single_paper_limitation_and_future_work():
+    """Single-paper limitation and future work must not claim 'subsequent work'."""
+    analyzer = ResearchPatternAnalyzer(min_supporting_evidence=1)
+    s1_id = uuid.uuid4()
+    s2_id = uuid.uuid4()
+    p1 = uuid.uuid4()
+
+    statements = [
+        {
+            "id": s1_id,
+            "paper_id": p1,
+            "statement_type": "LIMITATION",
+            "statement_text": "Context pruning fails on long distractor documents.",
+        },
+        {
+            "id": s2_id,
+            "paper_id": p1,
+            "statement_type": "FUTURE_WORK",
+            "statement_text": "Developing iterative pruning for multi-hop QA.",
+        },
+    ]
+
+    cluster = SemanticCluster(
+        cluster_id=0,
+        statements=statements,
+        paper_ids={p1},
+        centroid=np.ones(10, dtype=np.float32),
+        statement_type_counts={"LIMITATION": 1, "FUTURE_WORK": 1},
+    )
+
+    candidates = analyzer.analyze_clusters([cluster])
+    assert len(candidates) == 1
+
+    gap = candidates[0]
+    assert gap.signals["pattern_type"] == "LIMITATION_AND_FUTURE_WORK"
+    assert "subsequent work" not in gap.why_existing_work_insufficient
+    assert "Current work demonstrates documented constraints" in gap.why_existing_work_insufficient
+    assert p1 in gap.supporting_paper_ids
+    assert len(gap.supporting_paper_ids) == 1
+
+
+def test_pattern_analyzer_multi_paper_limitation_and_future_work():
+    """Multi-paper limitation and future work appropriately references subsequent work."""
+    analyzer = ResearchPatternAnalyzer(min_supporting_evidence=1)
+    s1_id = uuid.uuid4()
+    s2_id = uuid.uuid4()
+    p1 = uuid.uuid4()
+    p2 = uuid.uuid4()
+
+    statements = [
+        {
+            "id": s1_id,
+            "paper_id": p1,
+            "statement_type": "LIMITATION",
+            "statement_text": "Context pruning fails on long distractor documents.",
+        },
+        {
+            "id": s2_id,
+            "paper_id": p2,
+            "statement_type": "FUTURE_WORK",
+            "statement_text": "Developing iterative pruning for multi-hop QA.",
+        },
+    ]
+
+    cluster = SemanticCluster(
+        cluster_id=0,
+        statements=statements,
+        paper_ids={p1, p2},
+        centroid=np.ones(10, dtype=np.float32),
+        statement_type_counts={"LIMITATION": 1, "FUTURE_WORK": 1},
+    )
+
+    candidates = analyzer.analyze_clusters([cluster])
+    assert len(candidates) == 1
+
+    gap = candidates[0]
+    assert gap.signals["pattern_type"] == "LIMITATION_AND_FUTURE_WORK"
+    assert "subsequent work explicitly designates this problem" in gap.why_existing_work_insufficient
+    assert set(gap.supporting_paper_ids) == {p1, p2}
+    assert len(gap.supporting_paper_ids) == 2
+
+
+def test_validator_bounds_evidence_statements_in_prompt():
+    """Validator bounds candidate evidence to max_evidence_per_candidate in prompt."""
+    p_id = uuid.uuid4()
+    stmts = []
+    statements_by_id = {}
+    stmt_ids = []
+    for i in range(6):
+        sid = uuid.uuid4()
+        stmt_ids.append(sid)
+        s = {
+            "id": sid,
+            "paper_id": p_id,
+            "statement_type": "LIMITATION",
+            "statement_text": f"Limitation statement number {i}.",
+            "section": "Discussion",
+        }
+        stmts.append(s)
+        statements_by_id[sid] = s
+
+    candidate = GapCandidate(
+        gap_statement="Unresolved scalability bottleneck.",
+        research_problem="Scalability in dense indexing.",
+        why_existing_work_insufficient="Current indexing exhibits excessive memory.",
+        supporting_statement_ids=stmt_ids,
+        supporting_paper_ids=[p_id],
+        relevant_limitations=[s["statement_text"] for s in stmts],
+        relevant_future_work=[],
+    )
+
+    provider = StubValidationProvider(
+        verdict=ValidationVerdict.VALID,
+        reasoning="Validated on top 3 statements.",
+        cited_ids=[str(stmt_ids[0])],
+    )
+
+    validator = GapValidator(provider=provider, min_valid_evidence=1, max_evidence_per_candidate=3)
+    res = validator.validate_candidate(candidate, statements_by_id)
+
+    assert res.status == GapStatus.VALIDATED
+    assert provider.last_prompt is not None
+    # Only first 3 statements should appear in the prompt
+    for sid in stmt_ids[:3]:
+        assert str(sid) in provider.last_prompt
+    for sid in stmt_ids[3:]:
+        assert str(sid) not in provider.last_prompt
+
+    # Check evidence-count metadata
+    assert res.metadata.get("total_candidate_evidence_count") == 6
+    assert res.metadata.get("evaluated_evidence_count") == 3
+
+
+def test_validator_deduplicates_repeated_passages():
+    """Validator deduplicates repeated source passages across evidence statements."""
+    p_id = uuid.uuid4()
+    pass_id = uuid.uuid4()
+    s1_id = uuid.uuid4()
+    s2_id = uuid.uuid4()
+
+    passage_text = "Empirical tests demonstrate that 4-bit quantization reduces memory by 60% with 1% loss."
+    statements_by_id = {
+        s1_id: {
+            "id": s1_id,
+            "paper_id": p_id,
+            "passage_id": pass_id,
+            "statement_type": "LIMITATION",
+            "statement_text": "Quantization introduces precision degradation.",
+            "section": "Methods",
+        },
+        s2_id: {
+            "id": s2_id,
+            "paper_id": p_id,
+            "passage_id": pass_id,
+            "statement_type": "LIMITATION",
+            "statement_text": "Calibration error increases under aggressive clipping.",
+            "section": "Methods",
+        },
+    }
+    passages_by_id = {
+        pass_id: {
+            "id": pass_id,
+            "paper_id": p_id,
+            "text": passage_text,
+        }
+    }
+
+    candidate = GapCandidate(
+        gap_statement="Quantization noise in low-bit models.",
+        research_problem="Quantization fidelity.",
+        why_existing_work_insufficient="Clipping introduces non-linear distortion.",
+        supporting_statement_ids=[s1_id, s2_id],
+        supporting_paper_ids=[p_id],
+    )
+
+    provider = StubValidationProvider(
+        verdict=ValidationVerdict.VALID,
+        reasoning="Quantization loss confirmed.",
+        cited_ids=[str(s1_id), str(s2_id)],
+    )
+
+    validator = GapValidator(provider=provider, min_valid_evidence=1, max_evidence_per_candidate=3)
+    res = validator.validate_candidate(candidate, statements_by_id, passages_by_id=passages_by_id)
+
+    assert res.status == GapStatus.VALIDATED
+    prompt = provider.last_prompt
+    assert prompt.count(passage_text) == 1
+    assert f"[Same source passage as statement {s1_id} above]" in prompt
+
+
+def test_validator_propagates_provider_failure_error():
+    """Validator propagates ProviderFailureError rather than creating a fake rejected gap."""
+    from ideagen.llm.exceptions import ProviderFailureError
+
+    class FailingProvider(LLMProvider):
+        def generate_structured(self, prompt: str, response_schema):
+            raise ProviderFailureError("Ollama request timed out after 300.0s")
+
+    s_id = uuid.uuid4()
+    p_id = uuid.uuid4()
+    statements_by_id = {
+        s_id: {
+            "id": s_id,
+            "paper_id": p_id,
+            "statement_type": "LIMITATION",
+            "statement_text": "Timeout test statement.",
+        }
+    }
+    candidate = GapCandidate(
+        gap_statement="Timeout test gap.",
+        research_problem="Problem.",
+        why_existing_work_insufficient="Insufficient.",
+        supporting_statement_ids=[s_id],
+        supporting_paper_ids=[p_id],
+    )
+
+    validator = GapValidator(provider=FailingProvider(), min_valid_evidence=1)
+    with pytest.raises(ProviderFailureError) as exc_info:
+        validator.validate_candidate(candidate, statements_by_id)
+
+    assert "Ollama request timed out after 300.0s" in str(exc_info.value)
+
+
+def test_pipeline_aborts_on_provider_failure_error(tmp_path):
+    """Pipeline aborts candidate processing loop on ProviderFailureError and re-raises."""
+    from unittest.mock import MagicMock
+    from ideagen.llm.exceptions import ProviderFailureError
+    from ideagen.discovery.pipeline import SemanticGapDiscoveryPipeline
+    from ideagen.db.persistence import SQLAlchemyPersistenceLayer
+
+    call_count = 0
+
+    class FailingOnSecondProvider(LLMProvider):
+        def generate_structured(self, prompt: str, response_schema):
+            nonlocal call_count
+            call_count += 1
+            raise ProviderFailureError("Ollama connection timed out")
+
+    mock_persistence = MagicMock(spec=SQLAlchemyPersistenceLayer)
+    # Mock statements returning 2 distinct valid clusters (min_cluster_size=2 each)
+    s1 = MagicMock(id=uuid.uuid4(), paper_id=uuid.uuid4(), statement_text="Retrieval latency suffers severe degradation under noise.", statement_type="LIMITATION", passage_id=None, section=None)
+    s2 = MagicMock(id=uuid.uuid4(), paper_id=uuid.uuid4(), statement_text="High latency overhead limits real-time traversal.", statement_type="LIMITATION", passage_id=None, section=None)
+    s3 = MagicMock(id=uuid.uuid4(), paper_id=uuid.uuid4(), statement_text="Vision grounding fails on out-of-distribution distractors.", statement_type="LIMITATION", passage_id=None, section=None)
+    s4 = MagicMock(id=uuid.uuid4(), paper_id=uuid.uuid4(), statement_text="Multimodal vision alignment lacks empirical robustness.", statement_type="LIMITATION", passage_id=None, section=None)
+    mock_persistence.get_all_research_statements.return_value = [s1, s2, s3, s4]
+    mock_persistence.get_all_passages.return_value = []
+
+    pipeline = SemanticGapDiscoveryPipeline(
+        persistence=mock_persistence,
+        embedding_provider=DeterministicTestEmbeddingProvider(dimension=128),
+        llm_provider=FailingOnSecondProvider(),
+        index_dir=tmp_path,
+    )
+
+    with pytest.raises(ProviderFailureError):
+        pipeline.discover_gaps(persist_index=False)
+
+    # First candidate failed with timeout, loop must have aborted immediately without calling second
+    assert call_count == 1

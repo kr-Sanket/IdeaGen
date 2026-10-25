@@ -50,7 +50,7 @@ class PassageSelector:
         "related work": 12,
     }
 
-    def __init__(self, max_passages: int = 12, max_total_words: int = 4000):
+    def __init__(self, max_passages: int = 12, max_total_words: int = 2500):
         self.max_passages = max_passages
         self.max_total_words = max_total_words
 
@@ -76,7 +76,8 @@ class PassageSelector:
             if p.text and p.text.strip()
         ]
 
-        if len(candidates) <= self.max_passages:
+        total_words = sum(len(p.text.split()) for p in candidates)
+        if len(candidates) <= self.max_passages and total_words <= self.max_total_words:
             return candidates
 
         # Group by section relevance
@@ -121,10 +122,13 @@ class PassageSelector:
                 if len(selected) < self.max_passages:
                     add_passage(p)
 
-        # 6. Sort selected passages by original passage_index to maintain document flow
-        selected.sort(key=lambda p: p.passage_index)
+        # 6. If still under limit, add any remaining candidate passages
+        if len(selected) < self.max_passages:
+            for p in candidates:
+                if len(selected) < self.max_passages:
+                    add_passage(p)
 
-        # 7. Check word count budget
+        # 7. Check word count budget based on selection priority
         budgeted: List[SelectedPassage] = []
         current_words = 0
         for p in selected:
@@ -134,6 +138,9 @@ class PassageSelector:
                 current_words += word_count
             else:
                 break
+
+        # 8. Sort selected passages by original passage_index to maintain document flow
+        budgeted.sort(key=lambda p: p.passage_index)
 
         return budgeted
 

@@ -1,16 +1,35 @@
+import os
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 from ideagen.core.config import get_settings
 from ideagen.db.models import Base
-import os
+from ideagen.db.session import configure_sqlite_foreign_keys
+
 
 @pytest.fixture(scope="session")
 def engine():
     db_url = os.getenv("IDEAGEN_DATABASE_URL", get_settings().database_url)
-    if not db_url:
-        pytest.skip("IDEAGEN_DATABASE_URL is not configured; skipping PostgreSQL integration tests.")
-    eng = create_engine(db_url)
+    if db_url:
+        eng = create_engine(db_url)
+        configure_sqlite_foreign_keys(eng)
+    else:
+        eng = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        configure_sqlite_foreign_keys(eng)
+
+        @event.listens_for(eng, "connect")
+        def do_connect(dbapi_connection, connection_record):
+            dbapi_connection.isolation_level = None
+
+        @event.listens_for(eng, "begin")
+        def do_begin(conn):
+            conn.exec_driver_sql("BEGIN")
+
     Base.metadata.create_all(eng)
     yield eng
 

@@ -15,6 +15,7 @@ from ideagen.db.models import (
 )
 from ideagen.opportunity.models import OpportunityRelationship, OpportunityStatus
 from ideagen.opportunity.classifier import (
+    RELATIONSHIP_CLASSIFIER_PROMPT_VERSION,
     RelationshipClassifier,
     RelationshipClassification,
 )
@@ -30,7 +31,7 @@ from tests.opportunity.fake_provider import FakeLLMProvider
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
-def _make_paper(session, title="Test Paper", abstract="Test abstract."):
+def _make_paper(session, title="Test Paper", abstract="Test abstract containing mock excerpt and a bounded excerpt."):
     """Create and persist a minimal Paper."""
     paper = Paper(
         source_type=SourceType.OPENALEX_API.value,
@@ -109,7 +110,7 @@ class TestAllRelationshipsFromOpen:
         assert result.evidence_id is not None
         assert result.history_id is not None
         assert result.classifier_confidence == 0.9
-        assert result.prompt_version == "v1"
+        assert result.prompt_version == RELATIONSHIP_CLASSIFIER_PROMPT_VERSION
 
         # Verify DB
         session.refresh(opp)

@@ -1,0 +1,153 @@
+from __future__ import annotations
+
+import logging
+import re
+from typing import TYPE_CHECKING, Optional, Type, TypeVar
+import requests
+from pydantic import BaseModel, ValidationError
+
+from ideagen.llm.provider import LLMProvider
+from ideagen.llm.exceptions import ProviderFailureError, ProviderConnectionError, MalformedResponseError
+from ideagen.core.network import proxy_hint
+
+if TYPE_CHECKING:
+    from ideagen.llm.ollama_lifecycle import OllamaLifecycleManager
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T", bound=BaseModel)
+
+
+class OllamaLLMProvider(LLMProvider):
+    """Local LLM Provider backed by Ollama with structured JSON schema output."""
+
+    def __init__(
+        self,
+        base_url: str = "http://localhost:11434",
+        model_name: str = "qwen3:8b",
+        timeout: float = 300.0,
+        num_ctx: int = 8192,
+        num_predict: Optional[int] = 1024,
+        lifecycle_manager: Optional[OllamaLifecycleManager] = None,
+    ):
+        self.base_url = base_url.rstrip("/")
+        self.model_name = model_name
+        self.timeout = timeout
+        self.num_ctx = num_ctx
+        self.num_predict = num_predict
+        self.lifecycle_manager = lifecycle_manager
+
+    def _send_chat_request(
+        self,
+        chat_url: str,
+        payload: dict,
+        eff_timeout: float,
+        response_schema: Type[T],
+    ) -> T:
+        try:
+            response = requests.post(
+                chat_url,
+                json=payload,
+                timeout=eff_timeout,
+            )
+        except requests.exceptions.Timeout as e:
+            raise ProviderConnectionError(f"Ollama request timed out after {eff_timeout}s: {e}") from e
+        except requests.exceptions.RequestException as e:
+            raise ProviderConnectionError(
+                f"Ollama connection error at {self.base_url} (model {self.model_name}): {e}.{proxy_hint(chat_url)}"
+            ) from e
+
+        if response.status_code != 200:
+            body = " ".join((response.text or "").split())[:300]
+            hint = ""
+            if response.status_code == 404 and "not found" in body.lower():
+                hint = f" Pull the model with `ollama pull {self.model_name}`."
+            raise ProviderFailureError(
+                f"Ollama API returned HTTP {response.status_code}: {body}.{hint}{proxy_hint(chat_url)}"
+            )
+
+        try:
+            data = response.json()
+        except Exception as e:
+            raise ProviderFailureError(f"Failed to parse Ollama HTTP response as JSON: {e}") from e
+
+        # Check explicit truncation from Ollama done_reason
+        done_reason = data.get("done_reason")
+        raw_content = data.get("message", {}).get("content", "").strip()
+
+        if done_reason == "length":
+            raise MalformedResponseError(
+                f"Ollama generation truncated: exceeded output token budget (done_reason=length).\nRaw output: {raw_content}"
+            )
+
+        if not raw_content:
+            raise ProviderFailureError("Ollama returned an empty response.")
+
+        # Clean potential markdown fences (e.g., ```json ... ```)
+        cleaned_content = raw_content
+        if cleaned_content.startswith("```"):
+            cleaned_content = re.sub(r"^```(?:json)?\s*", "", cleaned_content, flags=re.IGNORECASE)
+            cleaned_content = re.sub(r"\s*```$", "", cleaned_content).strip()
+
+        try:
+            return response_schema.model_validate_json(cleaned_content)
+        except ValidationError as e:
+            raise MalformedResponseError(
+                f"Response failed schema validation: {e}\nRaw output: {raw_content}"
+            ) from e
+        except Exception as e:
+            raise MalformedResponseError(
+                f"Failed to parse JSON response: {e}\nRaw output: {raw_content}"
+            ) from e
+
+    def generate_structured(
+        self,
+        prompt: str,
+        response_schema: Type[T],
+        timeout: Optional[float] = None,
+        num_predict: Optional[int] = None,
+    ) -> T:
+        """Generates a structured response validated against the provided Pydantic schema.
+
+        Args:
+            prompt: The instruction and context prompt.
+            response_schema: A Pydantic model class defining the expected output.
+            timeout: Optional per-call request timeout in seconds.
+            num_predict: Optional per-call override for maximum generated output tokens.
+
+        Returns:
+            An instance of response_schema.
+
+        Raises:
+            ProviderFailureError: If Ollama is unreachable, returns HTTP error, or times out.
+            MalformedResponseError: If Ollama output cannot be parsed or fails schema validation.
+        """
+        chat_url = f"{self.base_url}/api/chat"
+        eff_timeout = timeout if timeout is not None else self.timeout
+
+        try:
+            schema_dict = response_schema.model_json_schema()
+        except Exception:
+            schema_dict = "json"
+
+        options = {
+            "temperature": 0.0,
+            "num_ctx": self.num_ctx,
+        }
+        eff_num_predict = num_predict if num_predict is not None else self.num_predict
+        if eff_num_predict is not None:
+            options["num_predict"] = eff_num_predict
+
+        payload = {
+            "model": self.model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+            "think": False,
+            "format": schema_dict,
+            "options": options,
+        }
+
+        if self.lifecycle_manager is not None:
+            with self.lifecycle_manager.lease(required_models=[self.model_name]):
+                return self._send_chat_request(chat_url, payload, eff_timeout, response_schema)
+        return self._send_chat_request(chat_url, payload, eff_timeout, response_schema)

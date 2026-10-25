@@ -1,11 +1,68 @@
-from typing import Optional
+import re
+from typing import Optional, Sequence, Union
 import uuid
 from sqlalchemy.orm import Session
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
-from ideagen.db.models import Opportunity, Paper, OpportunityEvidence, OpportunityHistory
+from ideagen.db.models import Opportunity, Paper, PaperPassage, OpportunityEvidence, OpportunityHistory
 from ideagen.opportunity.models import OpportunityRelationship, OpportunityStatus
 from ideagen.opportunity.state_machine import transition
+from ideagen.opportunity.grounding import (
+    is_excerpt_grounded,
+    validate_evidence_grounding,
+    SUBSTANTIVE_RELATIONSHIPS,
+    UngroundedEvidenceError,
+)
+
+
+def get_paper_canonical_identity(paper: Paper) -> str:
+    """Extracts a canonical identity string for safe paper deduplication.
+
+    Uses the strongest safe identity fields available in the schema:
+    1. Canonical DOI (normalized: lowercase, stripped)
+    2. Normalized Title (lowercase, stripped of punctuation and extra whitespace)
+    3. Source identity (source_type:source_id)
+    4. Fallback to paper UUID
+
+    Limitation: True scientific independence (different lab, no co-authors,
+    or preprint-to-journal publication lineage) cannot be fully established
+    without author entity disambiguation and complete citation graph tracking.
+    We implement the strongest safe deduplication possible using the existing schema.
+    """
+    if paper.doi and paper.doi.strip():
+        return f"doi:{paper.doi.strip().lower()}"
+
+    if paper.title and paper.title.strip():
+        norm_title = re.sub(r"[^\w\s]", "", paper.title.lower())
+        norm_title = re.sub(r"\s+", " ", norm_title).strip()
+        if len(norm_title) >= 5:
+            return f"title:{norm_title}"
+
+    if paper.source_type and paper.source_id:
+        return f"source:{paper.source_type}:{paper.source_id.strip()}"
+
+    return f"id:{str(paper.id)}"
+
+
+def is_evidence_grounded_for_paper(
+    evidence: OpportunityEvidence,
+    paper: Paper,
+    passages: Sequence[Union[str, any]],
+) -> bool:
+    """Verifies that an evidence row represents verified grounded literature evidence.
+
+    Ungrounded excerpts or evidences without supporting text cannot contribute
+    towards multi-paper resolution.
+    """
+    if not evidence.supporting_text or not evidence.supporting_text.strip():
+        return False
+    if passages:
+        return is_excerpt_grounded(evidence.supporting_text, passages)
+    if paper.abstract:
+        return is_excerpt_grounded(evidence.supporting_text, [paper.abstract])
+    return False
+
 
 class OpportunityTransitionService:
     def __init__(self, session: Session):
@@ -22,6 +79,8 @@ class OpportunityTransitionService:
         Applies a relationship classification to an Opportunity deterministically.
         Uses SELECT ... FOR UPDATE to prevent concurrent modifications.
         Idempotency: Rejects duplicate applications of the same paper-opportunity pair.
+        Deterministic Resolution: Requires >= 2 distinct papers with independently
+        grounded ADDRESSES evidence to reach the RESOLVED state.
         """
         # Validate existence and lock the opportunity row
         opportunity = self.session.execute(
@@ -42,8 +101,6 @@ class OpportunityTransitionService:
             raise ValueError(f"Paper {paper_id} not found.")
             
         # Check for idempotency: if this exact relationship from this paper is already applied, we reject to avoid duplicates.
-        # Actually, let's just reject if ANY evidence exists from this paper for this opportunity. 
-        # A paper shouldn't provide multiple conflicting evidences.
         existing_evidence = self.session.execute(
             select(OpportunityEvidence)
             .where(
@@ -55,24 +112,133 @@ class OpportunityTransitionService:
         if existing_evidence is not None:
             raise ValueError(f"Evidence from Paper {paper_id} already exists for Opportunity {opportunity_id}.")
 
-        previous_status = OpportunityStatus(opportunity.status)
-        new_status = transition(previous_status, relationship)
+        # Fail-closed evidence grounding validation
+        stored_passages = self.session.execute(
+            select(PaperPassage)
+            .where(PaperPassage.paper_id == paper_id)
+            .order_by(PaperPassage.passage_index)
+        ).scalars().all()
 
-        # 1. Create Evidence
+        if relationship in SUBSTANTIVE_RELATIONSHIPS:
+            if stored_passages:
+                validate_evidence_grounding(
+                    excerpt=evidence_excerpt,
+                    passages=stored_passages,
+                    relationship=relationship,
+                    paper_id=paper_id,
+                )
+            else:
+                sources = [paper.abstract] if paper.abstract and paper.abstract.strip() else []
+                if sources:
+                    validate_evidence_grounding(
+                        excerpt=evidence_excerpt,
+                        passages=sources,
+                        relationship=relationship,
+                        paper_id=paper_id,
+                    )
+                else:
+                    raise UngroundedEvidenceError(
+                        f"Evidence excerpt cannot be grounded: paper {paper_id} has neither stored passages nor abstract."
+                    )
+
+        # 1. Create Evidence and flush to persist in current transaction
         evidence = OpportunityEvidence(
             opportunity_id=opportunity_id,
             paper_id=paper_id,
             evidence_type=relationship.value,
             supporting_text=evidence_excerpt
         )
-        self.session.add(evidence)
-        self.session.flush()
+        # begin_nested() flushes already-pending state itself, so open the savepoint
+        # before adding the evidence: any IntegrityError raised inside the try block
+        # then comes from this insert, and the savepoint is always bound.
+        sp = self.session.begin_nested()
+        try:
+            self.session.add(evidence)
+            self.session.flush()
+        except IntegrityError as err:
+            sp.rollback()
+            # Handle uniqueness conflicts as idempotent duplicate results where appropriate,
+            # without hiding unrelated IntegrityError failures or leaving the session unusable.
+            concurrent_evidence = self.session.execute(
+                select(OpportunityEvidence)
+                .where(
+                    OpportunityEvidence.opportunity_id == opportunity_id,
+                    OpportunityEvidence.paper_id == paper_id,
+                )
+            ).scalar_one_or_none()
+            if concurrent_evidence is not None:
+                raise ValueError(
+                    f"Evidence from Paper {paper_id} already exists for Opportunity {opportunity_id}."
+                ) from err
+            raise
+        sp.commit()
 
-        # 2. Update Status if changed
+        # 2. Determine addressing paper count for multi-paper resolution rule
+        addressing_paper_count = 1
+        if relationship == OpportunityRelationship.ADDRESSES:
+            # Check for latest reopening event from RESOLVED -> OPEN triggered by CONTRADICTS
+            latest_reopen = self.session.execute(
+                select(OpportunityHistory)
+                .where(
+                    OpportunityHistory.opportunity_id == opportunity_id,
+                    OpportunityHistory.previous_status == OpportunityStatus.RESOLVED.value,
+                    OpportunityHistory.new_status == OpportunityStatus.OPEN.value,
+                    OpportunityHistory.trigger_type == OpportunityRelationship.CONTRADICTS.value,
+                )
+                .order_by(OpportunityHistory.created_at.desc(), OpportunityHistory.id.desc())
+            ).scalars().first()
+
+            ev_stmt = select(OpportunityEvidence).where(
+                OpportunityEvidence.opportunity_id == opportunity_id,
+                OpportunityEvidence.evidence_type == OpportunityRelationship.ADDRESSES.value,
+            )
+            if latest_reopen is not None:
+                # Old addressing evidence predating the reopening boundary must not count toward
+                # the two-new-distinct-addressing-papers requirement after reopening.
+                ev_stmt = ev_stmt.where(
+                    (OpportunityEvidence.created_at > latest_reopen.created_at) |
+                    (OpportunityEvidence.id == evidence.id)
+                )
+
+            addressing_evidences = self.session.execute(ev_stmt).scalars().all()
+            ev_paper_ids = list({ev.paper_id for ev in addressing_evidences})
+            if ev_paper_ids:
+                papers = self.session.execute(
+                    select(Paper).where(Paper.id.in_(ev_paper_ids))
+                ).scalars().all()
+                paper_map = {p.id: p for p in papers}
+
+                passages = self.session.execute(
+                    select(PaperPassage).where(PaperPassage.paper_id.in_(ev_paper_ids))
+                ).scalars().all()
+                passage_map: dict[uuid.UUID, list[PaperPassage]] = {}
+                for psg in passages:
+                    passage_map.setdefault(psg.paper_id, []).append(psg)
+
+                distinct_identities = set()
+                for ev in addressing_evidences:
+                    p = paper_map.get(ev.paper_id)
+                    if not p:
+                        continue
+                    p_passages = passage_map.get(ev.paper_id, [])
+                    # Count only verified grounded evidence
+                    if is_evidence_grounded_for_paper(ev, p, p_passages):
+                        distinct_identities.add(get_paper_canonical_identity(p))
+
+                addressing_paper_count = len(distinct_identities)
+
+        previous_status = OpportunityStatus(opportunity.status)
+        new_status = transition(
+            previous_status,
+            relationship,
+            addressing_paper_count=addressing_paper_count,
+        )
+
+        # 3. Update Status if changed
         if new_status != previous_status:
             opportunity.status = new_status.value
             
-            # 3. Create History
+            # 4. Create History
             history = OpportunityHistory(
                 opportunity_id=opportunity_id,
                 previous_status=previous_status.value,

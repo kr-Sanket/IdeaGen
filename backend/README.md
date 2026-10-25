@@ -8,22 +8,6 @@ Backend services for the IdeaGen project.
 # Create virtual environment
 python -m venv .venv
 
-# Activate (Windows)
-.venv\Scripts\activate
-
-# Activate (macOS/Linux)
-source .venv/bin/activate
-
-# IdeaGen Backend
-
-Backend services for the IdeaGen project.
-
-## Setup
-
-```bash
-# Create virtual environment
-python -m venv .venv
-
 # Activate (macOS/Linux)
 source .venv/bin/activate
 # Windows: .venv\Scripts\activate
@@ -40,12 +24,21 @@ cp .env.example .env
 All settings use the `IDEAGEN_` environment variable prefix.
 See [`.env.example`](.env.example) for available options.
 
+### Local Ollama Provider Architecture
+IdeaGen uses local Ollama instances for deep learning inference and dense embeddings:
+- **LLM**: `qwen3:8b` (via `IDEAGEN_OLLAMA_MODEL`)
+- **Context Window**: 8192 tokens (via `IDEAGEN_OLLAMA_NUM_CTX`, passed as `options.num_ctx`)
+- **Embeddings**: `nomic-embed-text` (768 dimensions, via `IDEAGEN_OLLAMA_EMBEDDING_MODEL`)
+- **Endpoint**: `http://localhost:11434` (via `IDEAGEN_OLLAMA_BASE_URL`)
+
+Providers are instantiated lazily on demand. Unit tests and offline development workflows do not require Ollama to be running.
+
 ## Testing Architecture
 
 The backend test suite is divided into two distinct execution tiers:
 
 ### 1. Offline Tests (No Database Required)
-- **Unit & Logic Suites**: `tests/opportunity/test_state_machine.py`, `tests/opportunity/test_classifier.py`, `tests/opportunity/test_discovery.py`, `tests/ingestion/`, `tests/rag/`, `tests/retrieval/`, `tests/generation/`, and `tests/test_config.py`.
+- **Unit & Logic Suites**: `tests/test_ollama_provider.py`, `tests/opportunity/test_state_machine.py`, `tests/opportunity/test_classifier.py`, `tests/opportunity/test_discovery.py`, `tests/ingestion/`, `tests/rag/`, `tests/retrieval/`, `tests/generation/`, and `tests/test_config.py`.
 - **In-Memory SQLite Suites**: `tests/api/test_upload.py`, `tests/api/test_phase6_api.py`, `tests/api/test_demo.py`, `tests/api/test_search.py`, and `tests/generation/test_opportunity_persistence.py`.
 - If `IDEAGEN_DATABASE_URL` is unset, all database-dependent tests are automatically skipped with a clear notice, allowing offline tests to run without PostgreSQL or network access.
 
@@ -73,5 +66,5 @@ The backend test suite is divided into two distinct execution tiers:
 pytest
 
 # Run only pure unit tests
-pytest tests/opportunity/test_state_machine.py tests/test_config.py
+pytest tests/opportunity/test_state_machine.py tests/test_config.py tests/test_ollama_provider.py
 ```

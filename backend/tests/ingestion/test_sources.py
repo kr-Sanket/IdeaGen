@@ -37,7 +37,7 @@ def test_openalex_api_source(mock_client):
     assert len(papers) == 1
     p = papers[0]
     assert p.source_type == SourceType.OPENALEX_API
-    assert p.source_id == "https://openalex.org/W1"
+    assert p.source_id == "W1"
     assert p.doi == "10.123/api"
     assert p.title == "API Paper"
 
@@ -56,11 +56,12 @@ def test_openalex_snapshot_source(sample_openalex_json):
         assert len(papers) == 1
         p = papers[0]
         assert p.source_type == SourceType.OPENALEX_SNAPSHOT
-        assert p.source_id == "https://openalex.org/W1" # Same ID as API
+        assert p.source_id == "W1" # Canonical ID matching API
         assert p.doi == "10.123/api"
         assert p.title == "Snapshot Paper"
     finally:
         os.remove(temp_path)
+
 
 def test_manual_upload_source():
     manual_json = {

@@ -9,6 +9,7 @@ import hashlib
 import re
 from pathlib import Path
 from datetime import date, datetime, timezone
+from contextlib import nullcontext
 from typing import Optional, List, Dict, Any, Tuple
 import uuid
 import pymupdf
@@ -296,6 +297,10 @@ class ManualPDFIngestionService:
         authors: Optional[List[Dict[str, Any]]] = None,
         source_id: Optional[str] = None,
         check_duplicates: bool = False,
+        source_type: SourceType = SourceType.MANUAL_UPLOAD,
+        batch_id: str = "manual",
+        abstract: Optional[str] = None,
+        raw_metadata: Optional[Dict[str, Any]] = None,
     ) -> Tuple[PaperCreateDTO, PaperDocumentCreateDTO]:
         """Runs the complete ingestion pipeline with validation, provenance, passage chunking, and persistence."""
         self.validate_file(pdf_path)
@@ -316,33 +321,38 @@ class ManualPDFIngestionService:
         final_source_id = source_id or f"manual_{content_hash[:16]}"
         now_ts = datetime.now(timezone.utc)
 
-        # Determine abstract if present in detected sections
-        abstract_text = ""
-        for sec in extraction_result.sections:
-            if sec.name == "Abstract":
-                abstract_text = sec.text
-                break
+        # Determine abstract if present in detected sections or provided
+        abstract_text = abstract or ""
+        if not abstract_text:
+            for sec in extraction_result.sections:
+                if sec.name == "Abstract":
+                    abstract_text = sec.text
+                    break
         if not abstract_text:
             # First 500 chars as abstract preview
             abstract_text = extraction_result.full_text[:500]
 
+        meta: Dict[str, Any] = {
+            "original_filename": pdf_path.name,
+            "content_hash": content_hash,
+            "detected_title": extraction_result.title,
+            "num_pages": len(extraction_result.pages),
+            "num_sections": len(extraction_result.sections),
+        }
+        if raw_metadata:
+            meta.update(raw_metadata)
+
         paper_dto = PaperCreateDTO(
-            source_type=SourceType.MANUAL_UPLOAD,
+            source_type=source_type,
             source_id=final_source_id,
             doi=doi,
             title=final_title,
             publication_date=publication_date,
-            batch_id="manual",
+            batch_id=batch_id,
             abstract=abstract_text,
             authors=authors or [],
             referenced_works=[],
-            raw_metadata={
-                "original_filename": pdf_path.name,
-                "content_hash": content_hash,
-                "detected_title": extraction_result.title,
-                "num_pages": len(extraction_result.pages),
-                "num_sections": len(extraction_result.sections),
-            },
+            raw_metadata=meta,
         )
 
         if not self.persistence:
@@ -367,40 +377,42 @@ class ManualPDFIngestionService:
             )
             return paper_dto, doc_dto
 
-        # 4. Persist Paper
-        paper_id = self.persistence.save_paper(paper_dto)
-        if not paper_id:
-            raise RuntimeError("Failed to retrieve paper ID after saving.")
+        tx_ctx = self.persistence.transaction() if hasattr(self.persistence, "transaction") else nullcontext()
+        with tx_ctx:
+            # 4. Persist Paper
+            paper_id = self.persistence.save_paper(paper_dto)
+            if not paper_id:
+                raise RuntimeError("Failed to retrieve paper ID after saving.")
 
-        # 5. Persist PaperDocument
-        doc_dto = PaperDocumentCreateDTO(
-            paper_id=paper_id,
-            full_text=extraction_result.full_text,
-            extraction_method=self.extraction_method,
-            extraction_version=self.extraction_version,
-            extracted_at=extraction_result.extracted_at,
-            content_hash=content_hash,
-            original_filename=pdf_path.name,
-            acquisition_timestamp=now_ts,
-            provenance_metadata={
-                "source_type": SourceType.MANUAL_UPLOAD.value,
-                "source_id": final_source_id,
-                "content_hash": content_hash,
-                "original_filename": pdf_path.name,
-                "extraction_version": self.extraction_version,
-                "num_pages": len(extraction_result.pages),
-            },
-        )
-        saved_doc_id = self.persistence.save_paper_document(doc_dto)
-        doc_id = saved_doc_id or getattr(doc_dto, "id", uuid.uuid4())
+            # 5. Persist PaperDocument
+            doc_dto = PaperDocumentCreateDTO(
+                paper_id=paper_id,
+                full_text=extraction_result.full_text,
+                extraction_method=self.extraction_method,
+                extraction_version=self.extraction_version,
+                extracted_at=extraction_result.extracted_at,
+                content_hash=content_hash,
+                original_filename=pdf_path.name,
+                acquisition_timestamp=now_ts,
+                provenance_metadata={
+                    "source_type": SourceType.MANUAL_UPLOAD.value,
+                    "source_id": final_source_id,
+                    "content_hash": content_hash,
+                    "original_filename": pdf_path.name,
+                    "extraction_version": self.extraction_version,
+                    "num_pages": len(extraction_result.pages),
+                },
+            )
+            saved_doc_id = self.persistence.save_paper_document(doc_dto)
+            doc_id = saved_doc_id or getattr(doc_dto, "id", uuid.uuid4())
 
-        # 6. Create and persist deterministic passages
-        passages = self.chunker.create_passages(
-            blocks=block_units,
-            paper_id=paper_id,
-            document_id=doc_id,
-        )
-        if hasattr(self.persistence, "save_passages"):
-            self.persistence.save_passages(passages)
+            # 6. Create and persist deterministic passages
+            passages = self.chunker.create_passages(
+                blocks=block_units,
+                paper_id=paper_id,
+                document_id=doc_id,
+            )
+            if hasattr(self.persistence, "save_passages"):
+                self.persistence.save_passages(passages)
 
         return paper_dto, doc_dto

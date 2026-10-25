@@ -1,4 +1,4 @@
-from ideagen.evaluation.schemas import EvaluationResult
+from ideagen.evaluation.schemas import EvaluationResult, EvaluationType
 
 def evaluate_classifier_engineering() -> EvaluationResult:
     """
@@ -9,6 +9,7 @@ def evaluate_classifier_engineering() -> EvaluationResult:
     return EvaluationResult(
         evaluation_name="relationship_classifier_offline_fixture",
         fixture_version="phase_5_benchmark_25",
+        evaluation_type=EvaluationType.FIXTURE,
         model_provider="FakeLLMProvider",
         parameters={"prompt_version": "v1"},
         metrics={

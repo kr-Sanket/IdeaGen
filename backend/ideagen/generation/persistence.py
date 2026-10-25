@@ -13,6 +13,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from ideagen.db.models import (
+    ResearchGap,
     ResearchOpportunityRecord,
     PriorArtAssessmentRecord,
     OpportunityRefinementRecord,
@@ -39,15 +40,56 @@ class OpportunityPersistenceLayer:
         dto: ResearchOpportunityDTO,
         assessments: Optional[List[Tuple[int, PriorArtAssessment]]] = None,
         iterations: Optional[List[Tuple[int, str, str, str, str]]] = None,
+        bridge: bool = True,
     ) -> ResearchOpportunityRecord:
-        """Persists a ResearchOpportunityDTO and associated prior-art assessments & refinement records."""
+        """Persists a ResearchOpportunityDTO and associated prior-art assessments & refinement records.
 
+        With ``bridge=True`` the generation record and its lifecycle bridge are one atomic unit:
+        if bridging fails, the unit is rolled back to a savepoint (leaving any earlier session
+        state untouched and the session usable) and the original exception is re-raised, so a
+        generation record is never committed without its lifecycle Opportunity.
+        """
+        if not bridge:
+            record = self._add_records(dto, assessments, iterations)
+            self.session.commit()
+            self.session.refresh(record)
+            return record
+
+        from ideagen.opportunity.bridge import OpportunityBridgeService
+
+        savepoint = self.session.begin_nested()
+        try:
+            record = self._add_records(dto, assessments, iterations)
+            OpportunityBridgeService(self.session).bridge_opportunity(record)
+            savepoint.commit()
+        except Exception:
+            savepoint.rollback()
+            logger.error(
+                f"Failed to persist and bridge ResearchOpportunityRecord {dto.id}; "
+                "the generation record was not saved."
+            )
+            raise
+
+        self.session.commit()
+        self.session.refresh(record)
+        return record
+
+    def _add_records(
+        self,
+        dto: ResearchOpportunityDTO,
+        assessments: Optional[List[Tuple[int, PriorArtAssessment]]],
+        iterations: Optional[List[Tuple[int, str, str, str, str]]],
+    ) -> ResearchOpportunityRecord:
+        """Adds the generation record, prior-art assessments and refinement records to the session."""
         # Convert Pydantic feasibility & novelty dicts
         feasibility_dict = dto.feasibility.model_dump()
         novelty_dict = dto.novelty_assessment.model_dump(mode="json")
 
+        # The opportunity belongs to its source gap's project, set atomically with the record.
+        source_gap = self.session.get(ResearchGap, dto.gap_id) if dto.gap_id else None
         record = ResearchOpportunityRecord(
             id=dto.id,
+            project_id=source_gap.project_id if source_gap is not None else None,
             gap_id=dto.gap_id,
             research_problem=dto.research_problem,
             identified_gap=dto.identified_gap,
@@ -102,8 +144,6 @@ class OpportunityPersistenceLayer:
                 )
                 self.session.add(iter_rec)
 
-        self.session.commit()
-        self.session.refresh(record)
         return record
 
     def get_opportunity_by_id(self, opportunity_id: uuid.UUID) -> Optional[ResearchOpportunityRecord]:

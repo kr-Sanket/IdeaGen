@@ -1,7 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { X, FileText, Bookmark, Layers, AlertCircle, Loader2 } from 'lucide-react';
+import { X, FileText, Bookmark, Layers, AlertCircle, Loader2, Link2, HelpCircle } from 'lucide-react';
 import type { EvidenceDetail } from '../types';
 import { api } from '../api/client';
+import { Badge } from './common/Badge';
+import { getStatementTypeBadgeVariant } from './common/badgeVariants';
+import { NotRecorded } from './common/NotRecorded';
 
 interface EvidenceDrawerProps {
   statementId: string | null;
@@ -22,134 +25,151 @@ export const EvidenceDrawer: React.FC<EvidenceDrawerProps> = ({ statementId, onC
     setError(null);
     api.getEvidenceDetail(statementId)
       .then((data) => setEvidence(data))
-      .catch((err) => setError(err.message || 'Failed to load evidence detail'))
+      .catch((err: Error) => setError(err.message || 'Failed to load evidence detail'))
       .finally(() => setLoading(false));
   }, [statementId]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
 
   if (!statementId) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-sm transition-opacity">
-      <div className="w-full max-w-xl bg-slate-900 border-l border-slate-700/60 text-slate-100 flex flex-col h-full shadow-2xl animate-in slide-in-from-right duration-200">
-        
+    <div className="drawer-overlay" onClick={onClose}>
+      <div className="drawer-panel" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
-        <div className="flex items-center justify-between p-5 border-b border-slate-800 bg-slate-950/50">
-          <div className="flex items-center space-x-2">
-            <Bookmark className="w-5 h-5 text-indigo-400" />
-            <h3 className="font-semibold text-lg text-slate-100">Evidence Provenance</h3>
+        <div className="drawer-header">
+          <div className="u-row">
+            <Bookmark size={20} className="tone-indigo" />
+            <h3 className="drawer-title">Statement Source Provenance</h3>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-slate-800 transition"
+            className="drawer-close-btn"
+            aria-label="Close drawer"
           >
-            <X className="w-5 h-5" />
+            <X size={20} />
           </button>
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        <div className="drawer-body">
           {loading && (
-            <div className="flex flex-col items-center justify-center py-20 text-slate-400">
-              <Loader2 className="w-8 h-8 animate-spin text-indigo-400 mb-3" />
-              <p className="text-sm">Fetching ground evidence provenance...</p>
+            <div className="drawer-loading">
+              <Loader2 className="drawer-loading-spinner animate-spin" />
+              <p>Retrieving statement source provenance...</p>
+              <p className="u-text-sm u-mono">Statement ID: {statementId}</p>
             </div>
           )}
 
           {error && (
-            <div className="p-4 rounded-lg bg-rose-950/40 border border-rose-800/60 text-rose-300 text-sm flex items-start space-x-3">
-              <AlertCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
-              <div>
-                <p className="font-semibold">Unable to fetch evidence detail</p>
-                <p className="text-xs text-rose-300/80 mt-1">{error}</p>
+            <div className="error-banner">
+              <div className="error-banner-content">
+                <AlertCircle className="error-banner-icon" />
+                <div>
+                  <h4 className="error-banner-title">Unable to fetch evidence detail</h4>
+                  <p className="error-banner-message">{error}</p>
+                </div>
               </div>
             </div>
           )}
 
           {evidence && !loading && (
-            <>
+            <div className="u-stack-lg">
               {/* Paper Source */}
-              <div className="p-4 rounded-xl bg-slate-800/40 border border-slate-700/50 space-y-2">
-                <div className="flex items-center space-x-2 text-xs text-indigo-400 font-mono uppercase tracking-wider">
-                  <FileText className="w-4 h-4" />
+              <div className="provenance-card">
+                <div className="provenance-meta-tag">
+                  <FileText size={16} />
                   <span>Source Paper</span>
                 </div>
-                <h4 className="font-medium text-slate-200 text-base">
+                <h4 className="provenance-paper-title">
                   {evidence.paper_title || `Paper ID: ${evidence.paper_id}`}
                 </h4>
-                <div className="flex flex-wrap gap-2 pt-1 text-xs text-slate-400">
-                  <span className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700">
-                    ID: {evidence.paper_id.slice(0, 8)}...
-                  </span>
+                <div className="provenance-paper-id">
+                  Paper UUID: {evidence.paper_id}
                 </div>
               </div>
 
               {/* Location Provenance */}
-              <div className="grid grid-cols-2 gap-4">
-                <div className="p-3.5 rounded-xl bg-slate-800/30 border border-slate-700/40">
-                  <span className="text-xs text-slate-400 block mb-1">Section</span>
-                  <span className="font-medium text-slate-200 text-sm">
-                    {evidence.section || 'Unspecified section'}
+              <div className="grid-2-cols grid-compact">
+                <div className="provenance-meta-box">
+                  <span className="meta-box-label">Paper Section</span>
+                  <span className="meta-box-value">
+                    {evidence.section || <NotRecorded />}
                   </span>
                 </div>
-                <div className="p-3.5 rounded-xl bg-slate-800/30 border border-slate-700/40">
-                  <span className="text-xs text-slate-400 block mb-1">Page Range</span>
-                  <span className="font-medium text-slate-200 text-sm">
+                <div className="provenance-meta-box">
+                  <span className="meta-box-label">Page Range</span>
+                  <span className="meta-box-value">
                     {evidence.page_start !== null && evidence.page_start !== undefined
                       ? `Page ${evidence.page_start}${evidence.page_end && evidence.page_end !== evidence.page_start ? `–${evidence.page_end}` : ''}`
-                      : 'N/A'}
+                      : <NotRecorded />}
                   </span>
                 </div>
               </div>
 
               {/* Extracted Research Statement */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between text-xs text-slate-400">
-                  <span className="font-mono uppercase text-slate-400">Extracted Statement</span>
-                  <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-indigo-950/70 text-indigo-300 border border-indigo-800/60">
-                    {evidence.statement_type}
-                  </span>
+              <div className="statement-provenance-box">
+                <div className="statement-header-row">
+                  <div className="u-row">
+                    <span className="label-caps">Extracted Statement</span>
+                    <Badge label="Model-Extracted" variant="model-generated" />
+                  </div>
+                  <Badge
+                    label={evidence.statement_type}
+                    variant={getStatementTypeBadgeVariant(evidence.statement_type)}
+                  />
                 </div>
-                <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 text-slate-200 text-sm italic leading-relaxed">
+                <div className="statement-text-highlight">
                   "{evidence.statement_text}"
                 </div>
               </div>
 
-              {/* Passage Text */}
-              {evidence.passage_text && (
-                <div className="space-y-2">
-                  <div className="flex items-center space-x-2 text-xs text-slate-400 font-mono uppercase">
-                    <Layers className="w-4 h-4 text-emerald-400" />
-                    <span>Exact Source Passage</span>
-                    {evidence.passage_index !== null && (
-                      <span className="text-slate-500">(Passage #{evidence.passage_index})</span>
-                    )}
+              {/* Linked Source Passage (this endpoint returns the linked passage; it does not verify it) */}
+              <div className="passage-provenance-box">
+                <div className="passage-header-row">
+                  <div className="u-row label-caps">
+                    <Layers size={16} />
+                    <span>Source Passage</span>
                   </div>
-                  <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800/80 text-slate-300 text-xs font-mono leading-relaxed max-h-60 overflow-y-auto">
+                  {evidence.passage_text ? (
+                    <span className="provenance-status-pill">
+                      <Link2 size={14} />
+                      <span>Linked source passage</span>
+                    </span>
+                  ) : (
+                    <span className="provenance-status-pill is-missing">
+                      <HelpCircle size={14} />
+                      <span>Source passage unavailable</span>
+                    </span>
+                  )}
+                </div>
+                {evidence.passage_text ? (
+                  <div className="passage-text-block">
                     {evidence.passage_text}
                   </div>
-                </div>
-              )}
-
-              {/* Confidence Indicator */}
-              {evidence.confidence !== null && evidence.confidence !== undefined && (
-                <div className="pt-2 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400">
-                  <span>Extraction Confidence</span>
-                  <span className="font-mono text-emerald-400 font-medium">
-                    {(evidence.confidence * 100).toFixed(1)}%
-                  </span>
-                </div>
-              )}
-            </>
+                ) : (
+                  <div className="passage-unavailable-note">
+                    No passage excerpt was linked to this statement ID in the database.
+                  </div>
+                )}
+              </div>
+            </div>
           )}
         </div>
 
         {/* Footer */}
-        <div className="p-4 border-t border-slate-800 bg-slate-950/50 flex justify-end">
+        <div className="drawer-footer">
           <button
             onClick={onClose}
-            className="px-4 py-2 rounded-lg text-sm bg-slate-800 hover:bg-slate-700 text-slate-200 transition"
+            className="btn btn-secondary"
           >
-            Close Panel
+            Close Provenance Panel
           </button>
         </div>
       </div>

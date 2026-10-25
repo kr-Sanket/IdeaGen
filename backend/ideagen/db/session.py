@@ -5,7 +5,7 @@ FastAPI dependency with automatic rollback and closing.
 """
 
 from typing import Generator
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, Session
 
 from ideagen.core.config import get_settings
@@ -14,6 +14,19 @@ settings = get_settings()
 
 _engine = None
 _SessionLocal = None
+
+
+def configure_sqlite_foreign_keys(engine):
+    """Enable foreign key constraints on every connection for SQLite engines.
+
+    Leaves non-SQLite engines (e.g. PostgreSQL) completely unaffected.
+    """
+    if engine.dialect.name == "sqlite":
+        @event.listens_for(engine, "connect")
+        def set_sqlite_pragma(dbapi_connection, connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
 
 
 def get_engine():
@@ -32,6 +45,7 @@ def get_engine():
             pool_size=10,
             max_overflow=20,
         )
+        configure_sqlite_foreign_keys(_engine)
     return _engine
 
 

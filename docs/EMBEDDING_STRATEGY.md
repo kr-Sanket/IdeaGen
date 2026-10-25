@@ -8,7 +8,7 @@ IdeaGen uses two distinct embedding approaches for different purposes.
 
 ## Whole-Paper Embeddings
 
-**Model:** SPECTER2
+**Model:** SPECTER2 (Design / Planned)
 
 **Purpose:**
 
@@ -16,11 +16,13 @@ IdeaGen uses two distinct embedding approaches for different purposes.
 - Candidate retrieval
 - Literature relationships
 
+> **Status:** SPECTER2 remains a planned whole-paper representation option in the design specification; it is not currently implemented as an active provider in code.
+
 ---
 
 ## Extracted Statement Embeddings
 
-**Model:** Sentence-transformer style model
+**Models:** SentenceTransformer (`all-MiniLM-L6-v2`), Ollama (`nomic-embed-text`), or Gemini (`text-embedding-004`) behind `EmbeddingProvider` protocol
 
 **Purpose:**
 
@@ -29,7 +31,7 @@ IdeaGen uses two distinct embedding approaches for different purposes.
 - Related extracted evidence embeddings
 - Semantic clustering for recurring-gap discovery
 
-> **OPEN DECISION:** The specific sentence-transformer model has not been finalized in the authoritative design.
+> **Status:** Implemented in `backend/ideagen/discovery/embeddings.py`.
 
 ---
 
@@ -73,12 +75,11 @@ When an embedding model is updated, the re-embedding strategy must account for v
 
 | Aspect | Classification |
 |--------|---------------|
-| SPECTER2 for whole-paper embeddings | **AUTHORITATIVE DESIGN** |
-| Sentence-transformer for statement embeddings | **AUTHORITATIVE DESIGN** |
-| FAISS as initial vector index | **AUTHORITATIVE DESIGN** |
+| SPECTER2 for whole-paper embeddings | **PLANNED DESIGN** (not active in code) |
+| Statement embedding providers (SentenceTransformer, Ollama, Gemini) | **IMPLEMENTED** (`backend/ideagen/discovery/embeddings.py`) |
+| FAISS as vector index | **IMPLEMENTED** (`backend/ideagen/retrieval/local.py`) |
 | PostgreSQL as source of truth (not FAISS) | **AUTHORITATIVE DESIGN** |
 | Vector metadata requirements | **AUTHORITATIVE DESIGN** |
 | Version integrity (no mixing) | **AUTHORITATIVE DESIGN** |
-| Specific sentence-transformer model | **OPEN DECISION** |
 | Re-embedding protocol | **OPEN DECISION** |
-| Current implementation | **NOT IMPLEMENTED** |
+| Current implementation | **Statement embeddings and FAISS index implemented** (see `docs/CURRENT_STATUS.md`) |

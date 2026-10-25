@@ -1,5 +1,4 @@
-from ideagen.evaluation.schemas import EvaluationResult
-from ideagen.evaluation.metrics import precision_score, recall_score, f1_score
+from ideagen.evaluation.schemas import EvaluationResult, EvaluationType
 
 def evaluate_discovery_engineering() -> EvaluationResult:
     """
@@ -10,6 +9,7 @@ def evaluate_discovery_engineering() -> EvaluationResult:
     return EvaluationResult(
         evaluation_name="discovery_controlled_fixture",
         fixture_version="phase_6_v1",
+        evaluation_type=EvaluationType.FIXTURE,
         model_provider="FakeGapEmbedder",
         parameters={"threshold": 0.8, "min_cluster_size": 2},
         metrics={"pairwise_precision": 1.0, "pairwise_recall": 1.0, "f1": 1.0},

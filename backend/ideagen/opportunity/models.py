@@ -1,5 +1,4 @@
 import enum
-from datetime import datetime
 from typing import Optional
 from uuid import UUID
 from pydantic import BaseModel, Field
@@ -23,6 +22,8 @@ class OpportunityCreateDTO(BaseModel):
     description: str
     status: OpportunityStatus = OpportunityStatus.OPEN
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    research_opportunity_id: Optional[UUID] = None
+    gap_id: Optional[UUID] = None
 
 class OpportunityEvidenceCreateDTO(BaseModel):
     opportunity_id: UUID

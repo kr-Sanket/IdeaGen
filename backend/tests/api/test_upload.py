@@ -102,3 +102,33 @@ def test_upload_malformed_pdf(monkeypatch):
     res = client.post("/api/papers/upload", files=files)
     assert res.status_code == 400
     assert "No readable PDFs found." in res.json()["detail"]
+
+
+def test_upload_paper_unknown_publication_date_remains_none(monkeypatch, isolated_upload_db):
+    """Regression test for Priority 2: Uploading a paper without known metadata
+    must leave publication_date as None, never fabricating today's date."""
+    def mock_extract(*args, **kwargs):
+        return "This paper has unknown publication date and arbitrary contents." * 10
+
+    from ideagen.ingestion.pdf import ManualPDFIngestionService
+    from ideagen.db.models import Paper
+    monkeypatch.setattr(ManualPDFIngestionService, "extract_text", mock_extract)
+
+    file_obj = io.BytesIO(create_mock_pdf_content(valid=True))
+    files = [("files", ("unknown_date_paper.pdf", file_obj, "application/pdf"))]
+
+    res = client.post("/api/papers/upload", files=files)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["count"] == 1
+    paper_res = data["papers"][0]
+
+    # Verify response schema does not fabricate today's date or year
+    assert paper_res["publication_date"] is None
+    assert paper_res["publication_year"] is None
+
+    # Verify database persistence does not fabricate today's date
+    saved_paper = isolated_upload_db.query(Paper).filter_by(title="unknown_date_paper.pdf").first()
+    assert saved_paper is not None
+    assert saved_paper.publication_date is None
+

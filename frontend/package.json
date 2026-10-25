@@ -6,11 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test": "node --test --experimental-strip-types src/projects/projectStore.test.ts src/workflow/runMonitor.test.ts src/workflow/selectionHighlighting.test.ts src/workflow/gapRefinement.test.ts",
     "lint": "oxlint",
     "preview": "vite preview"
   },
   "dependencies": {
-    "date-fns": "^4.4.0",
     "lucide-react": "^1.52.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"

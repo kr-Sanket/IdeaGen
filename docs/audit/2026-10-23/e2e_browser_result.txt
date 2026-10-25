@@ -1,0 +1,36 @@
+PASS A0 cyber project absent on server before sync
+PASS A1 legacy local project registered on server with same id
+PASS A2 registered cutoff/title preserved
+PASS A3 dashboard shows API Connected
+PASS A4 dashboard has no fabricated 'Stage 5 Evolution Complete'
+PASS A5 dashboard no horizontal overflow @390
+PASS B1 live OpenAlex search returned results in UI
+PASS B1b search page no horizontal overflow @390
+PASS B2 add result rendered — her attack classes.
+
+Publisher page
+PDF
+Added to Project (Existing Paper)
+Paper ID: 31b2b5d8-293f-49
+PASS B3 paper persisted & associated with cyber project (API) — 1 paper(s): ['From zero-shot machine learning to zero-day attack']
+PASS B4 Corpus Inspector shows paper after navigating back
+PASS B5 Corpus Inspector shows paper after full reload
+PASS B6 search results restored deliberately from session state
+PASS C1 duplicate add returns SKIPPED_DUPLICATE + already_in_project — {"status": "SKIPPED_DUPLICATE", "already_in_project": true, "project_associated": true}
+PASS C2 still exactly one corpus paper
+PASS D1 rag-benchmark corpus unchanged (11) and does not contain the cyber paper
+PASS D2 rag-benchmark stats unchanged — {"total_papers": 11, "total_gaps": 2, "total_opportunities": 1}
+PASS A6 modal-created project persisted on server
+PASS D3 new project corpus is empty (no leakage)
+PASS UI overview_cyber: renders, no overflow @390 (scrollWidth=390)
+PASS UI overview_rag: renders, no overflow @390 (scrollWidth=390)
+PASS UI overview_rag shows API-derived passages and no hardcoded health
+PASS UI settings: renders, no overflow @390 (scrollWidth=390)
+PASS UI settings shows live model availability
+PASS UI gaps_rag: renders, no overflow @390 (scrollWidth=390)
+PASS UI opps_rag: renders, no overflow @390 (scrollWidth=390)
+PASS UI history_rag: renders, no overflow @390 (scrollWidth=390)
+PASS UI history has no 'undefined' stage count
+PASS UI evolution_rag: renders, no overflow @390 (scrollWidth=390)
+
+SUMMARY: 29 passed, 0 failed

@@ -14,8 +14,7 @@ import uuid
 from ideagen.core.config import get_settings
 from ideagen.db.persistence import SQLAlchemyPersistenceLayer
 from ideagen.db.models import Paper
-from ideagen.llm.gemini_provider import GeminiLLMProvider
-from ideagen.llm.provider import LLMProvider
+from ideagen.llm import LLMProvider, get_default_llm_provider
 from .models import (
     ResearchKnowledgeCreateDTO,
     ResearchKnowledgeResponseDTO,
@@ -34,18 +33,17 @@ class PaperUnderstandingPipeline:
         persistence: SQLAlchemyPersistenceLayer,
         provider: Optional[LLMProvider] = None,
         model_name: Optional[str] = None,
+        first_attempt_num_predict: Optional[int] = None,
+        recovery_num_predict: Optional[int] = None,
     ):
         self.persistence = persistence
-        settings = get_settings()
 
         if provider is not None:
             self.provider = provider
-            self.model_name = model_name or "custom-provider"
+            self.model_name = model_name or getattr(provider, "model_name", "custom-provider")
         else:
-            # Default to configured Gemini provider using real pretrained model
-            api_key = settings.gemini_api_key or ""
-            self.model_name = model_name or settings.gemini_model_name
-            self.provider = GeminiLLMProvider(api_key=api_key, model_name=self.model_name)
+            self.provider = get_default_llm_provider()
+            self.model_name = model_name or getattr(self.provider, "model_name", "default-model")
 
         self.selector = PassageSelector()
         self.extractor = ScientificPaperExtractor(
@@ -53,6 +51,8 @@ class PaperUnderstandingPipeline:
             model_name=self.model_name,
             model_version="1.0",
             schema_version="v1.0",
+            first_attempt_num_predict=first_attempt_num_predict,
+            recovery_num_predict=recovery_num_predict,
         )
 
     def understand_paper(self, paper_id: uuid.UUID) -> ResearchKnowledgeResponseDTO:
